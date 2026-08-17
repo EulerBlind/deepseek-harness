@@ -10,7 +10,7 @@ import type { GenerateOptions, LlmResolvedModelInfo, StreamChunk } from '@deepse
 import SystemPrompt from '@deepseek-ai/dsh-system-prompt'
 import ToolRuntime, { type JsonValue } from '@deepseek-ai/dsh-tools'
 import type { PostToolDecision } from '@deepseek-ai/dsh-tools'
-import { publicToolName, syncTools, type ToolBridgeOptions } from '@deepseek-ai/dsh-mcp-client/src/tools.ts'
+import { normalizeInputSchema, publicToolName, syncTools, type ToolBridgeOptions } from '@deepseek-ai/dsh-mcp-client/src/tools.ts'
 import { createTransport } from '@deepseek-ai/dsh-mcp-client/src/transport.ts'
 import type { Config } from '@deepseek-ai/dsh-mcp-client'
 
@@ -177,6 +177,28 @@ describe('publicToolName', () => {
     const b = publicToolName('srv', 'admin_reset')
     expect(a).toBe(publicToolName('srv', 'admin.reset'))
     expect(a).not.toBe(b)
+  })
+})
+
+describe('normalizeInputSchema', () => {
+  it('materializes an explicit empty required array on object schemas that omit it', () => {
+    const schema = normalizeInputSchema({ type: 'object', properties: { path: { type: 'string' } } })
+    expect(schema).toEqual({ type: 'object', properties: { path: { type: 'string' } }, required: [] })
+  })
+
+  it('leaves object schemas with a declared required array untouched', () => {
+    const schema = normalizeInputSchema({ type: 'object', properties: { query: { type: 'string' } }, required: ['query'] })
+    expect(schema).toEqual({ type: 'object', properties: { query: { type: 'string' } }, required: ['query'] })
+  })
+
+  it('passes non-object or non-object-rooted schemas through unchanged', () => {
+    expect(normalizeInputSchema({ type: 'string' })).toEqual({ type: 'string' })
+    expect(normalizeInputSchema({ type: 'array', items: { type: 'string' } }))
+      .toEqual({ type: 'array', items: { type: 'string' } })
+    // The bridge passes an already-validated MCP record, but a defensive
+    // null/array value must pass through unchanged rather than throw.
+    expect(normalizeInputSchema(null as unknown as Record<string, unknown>)).toBeNull()
+    expect(normalizeInputSchema([] as unknown as Record<string, unknown>)).toEqual([])
   })
 })
 

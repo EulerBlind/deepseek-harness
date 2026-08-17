@@ -41,7 +41,7 @@ describe('ToolRuntime', () => {
     expect(ctx.tools.schemas()).toEqual([{
       name: 'echo',
       description: 'echo arguments back',
-      parameters: { type: 'object', properties: { text: { type: 'string' } } },
+      parameters: { type: 'object', properties: { text: { type: 'string' } }, required: [] },
     }])
     // schemas() result must not leak execute — ToolSchema deliberately has no
     // 'execute' key, so widen through unknown to probe for the absent property
@@ -1928,7 +1928,7 @@ describe('ToolRuntime', () => {
     expect(ctx.tools.schemas()).toEqual([{
       name: 'echo',
       description: 'echo arguments back',
-      parameters: { type: 'object', properties: { text: { type: 'string' } } },
+      parameters: { type: 'object', properties: { text: { type: 'string' } }, required: [] },
     }])
   })
 
@@ -2063,10 +2063,14 @@ describe('defineTool / schema DSL', () => {
     })
   })
 
-  it('handles empty spec (no properties, no required)', () => {
+  it('handles empty spec (no required properties) with an explicit empty required array', () => {
+    // An explicit `required: []` (never an absent keyword) keeps the emitted
+    // schema unambiguous for upstream validators that treat a missing
+    // `required` as null and reject the request (see QIA-423 / mcp-client).
     expect(parameterSchemaSpecToJsonSchema({})).toEqual({
       type: 'object',
       properties: {},
+      required: [],
     })
   })
 
@@ -2396,6 +2400,7 @@ describe('schema DSL optional and nested contracts', () => {
           },
         },
       },
+      required: [],
     })
   })
 

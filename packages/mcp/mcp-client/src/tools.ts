@@ -164,7 +164,7 @@ export async function syncTools(
         publicName,
         tool.name,
         tool.description ?? '',
-        tool.inputSchema,
+        normalizeInputSchema(tool.inputSchema),
         supportedOutputSchema(tool.outputSchema),
         tool.execution?.taskSupport === 'required',
         opts,
@@ -226,6 +226,27 @@ function supportedOutputSchema(candidate: unknown): JsonSchemaNode | undefined {
   } catch {
     return undefined
   }
+}
+
+/**
+ * Normalize one foreign MCP input schema for the harness wire contract.
+ *
+ * Object-rooted schemas from external servers may omit `required` when no
+ * property is mandatory (valid JSON Schema, `required` is optional). Some
+ * model gateways treat an absent `required` as `null` and reject the whole
+ * request with `null is not of type "array"` for that function. Always
+ * materialize the keyword as an explicit array (empty when nothing is
+ * required) so the emitted schema is unambiguous for every upstream.
+ * Non-object or unparseable schemas are passed through untouched.
+ */
+export function normalizeInputSchema(inputSchema: Record<string, unknown>): Record<string, unknown> {
+  if (inputSchema === null || typeof inputSchema !== 'object' || Array.isArray(inputSchema)) {
+    return inputSchema
+  }
+  if (inputSchema.type === 'object' && !Object.hasOwn(inputSchema, 'required')) {
+    return { ...inputSchema, required: [] }
+  }
+  return inputSchema
 }
 
 /**
