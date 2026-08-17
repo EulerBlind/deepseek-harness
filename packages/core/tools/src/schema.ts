@@ -451,7 +451,7 @@ export function parameterSchemaSpecToJsonSchema(spec: ParameterSchemaSpec): Para
   const schema: ParameterJsonSchema = {
     type: 'object',
     properties: compiled.properties,
-    ...(compiled.required === undefined ? {} : { required: compiled.required }),
+    required: compiled.required ?? [],
   }
   assertSupportedJsonSchema(schema)
   return schema

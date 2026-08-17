@@ -118,29 +118,39 @@ export async function syncTools(
 ): Promise<ToolDisposers> {
   // Phase 1: fetch and build the next generation without touching the registry.
   const definitions = new Map<string, ToolDefinition>()
-  const response = client.getServerCapabilities()?.tools === undefined
-    ? { tools: [] }
-    : await client.listTools(undefined, { cacheMode: 'refresh' })
-  for (const tool of response.tools) {
-    const publicName = publicToolName(opts.serverName, tool.name)
-    if (definitions.has(publicName)) {
-      throw new Error(
-        `mcp-client(${opts.serverName}): server listed tool "${tool.name}" more than once — invalid tool list`,
-      )
+  const seenCursors = new Set<string>()
+  let cursor: string | undefined
+  do {
+    const response = await listToolsUncached(client, cursor)
+    for (const tool of response.tools) {
+      const publicName = publicToolName(opts.serverName, tool.name)
+      if (definitions.has(publicName)) {
+        throw new Error(
+          `mcp-client(${opts.serverName}): server listed tool "${tool.name}" more than once — invalid tool list`,
+        )
+      }
+      definitions.set(publicName, createDefinition(
+        client,
+        ctx,
+        publicName,
+        tool.name,
+        tool.description ?? '',
+        normalizeInputSchema(tool.inputSchema),
+        supportedOutputSchema(tool.outputSchema),
+        tool.execution?.taskSupport === 'required',
+        opts,
+      ))
     }
-    definitions.set(publicName, createMcpToolDefinition(ctx, {
-      name: publicName,
-      rawName: tool.name,
-      description: tool.description ?? '',
-      inputSchema: tool.inputSchema,
-      outputSchema: tool.outputSchema,
-      taskRequired: tool.execution?.taskSupport === 'required',
-      call: (args, execution) => client.callTool(
-        { name: tool.name, arguments: args },
-        { signal: execution.signal, timeout: opts.toolCallTimeoutMs, toolDefinition: tool },
-      ),
-    }))
-  }
+    cursor = response.nextCursor
+    if (cursor) {
+      if (seenCursors.has(cursor)) {
+        throw new Error(
+          `mcp-client(${opts.serverName}): server repeated a tools/list continuation cursor — invalid tool list`,
+        )
+      }
+      seenCursors.add(cursor)
+    }
+  } while (cursor)
 
   // Phase 2: swap generations.
   for (const dispose of previous.values()) dispose()
@@ -213,6 +223,27 @@ export interface McpToolDefinitionOptions {
    * @returns the external result object, validated before content projection.
    */
   call(args: Record<string, unknown>, execution: ToolExecution): Promise<unknown>
+}
+
+/**
+ * Normalize one foreign MCP input schema for the harness wire contract.
+ *
+ * Object-rooted schemas from external servers may omit `required` when no
+ * property is mandatory (valid JSON Schema, `required` is optional). Some
+ * model gateways treat an absent `required` as `null` and reject the whole
+ * request with `null is not of type "array"` for that function. Always
+ * materialize the keyword as an explicit array (empty when nothing is
+ * required) so the emitted schema is unambiguous for every upstream.
+ * Non-object or unparseable schemas are passed through untouched.
+ */
+export function normalizeInputSchema(inputSchema: Record<string, unknown>): Record<string, unknown> {
+  if (inputSchema === null || typeof inputSchema !== 'object' || Array.isArray(inputSchema)) {
+    return inputSchema
+  }
+  if (inputSchema.type === 'object' && !Object.hasOwn(inputSchema, 'required')) {
+    return { ...inputSchema, required: [] }
+  }
+  return inputSchema
 }
 
 /**
