@@ -228,25 +228,74 @@ function supportedOutputSchema(candidate: unknown): JsonSchemaNode | undefined {
   }
 }
 
+const NODE_MAP_SLOTS = ['properties', 'definitions', '$defs'] as const
+const NODE_SLOTS = ['items', 'oneOf', 'anyOf', 'allOf', 'prefixItems', 'additionalProperties'] as const
+
+/** Whether a foreign schema node is object-typed (explicitly or by shape). */
+function isObjectSchemaNode(node: Record<string, unknown>): boolean {
+  return node.type === 'object' || Object.hasOwn(node, 'properties')
+}
+
+/**
+ * Recursively materialize `required: []` on every object node that omits it.
+ * Nested objects matter too: the same gateways reject an absent `required` at
+ * any depth with `null is not of type "array"` (QIA-425). Returns the input
+ * untouched when nothing needed normalization.
+ */
+function normalizeSchemaNode(node: unknown): unknown {
+  if (node === null || typeof node !== 'object' || Array.isArray(node)) return node
+  const record = node as Record<string, unknown>
+  let out = record
+  const patch = (key: string, value: unknown): void => {
+    if (out === record) out = { ...record }
+    out[key] = value
+  }
+  if (isObjectSchemaNode(record) && !Object.hasOwn(record, 'required')) {
+    patch('required', [])
+  }
+  // Map-typed slots hold one schema node per key (`properties` etc.).
+  for (const slot of NODE_MAP_SLOTS) {
+    const map = record[slot]
+    if (map === null || typeof map !== 'object' || Array.isArray(map)) continue
+    const entries = Object.entries(map as Record<string, unknown>)
+    let changed = false
+    const next: Record<string, unknown> = {}
+    for (const [key, entry] of entries) {
+      const normalized = normalizeSchemaNode(entry)
+      if (normalized !== entry) changed = true
+      next[key] = normalized
+    }
+    if (changed) patch(slot, next)
+  }
+  // Scalar/array-typed slots: one node, an array of nodes, or a boolean.
+  for (const slot of NODE_SLOTS) {
+    if (!Object.hasOwn(record, slot)) continue
+    const value = record[slot]
+    if (Array.isArray(value)) {
+      const next = value.map(entry => normalizeSchemaNode(entry))
+      if (next.some((entry, index) => entry !== value[index])) patch(slot, next)
+    } else if (value !== null && typeof value === 'object') {
+      const next = normalizeSchemaNode(value)
+      if (next !== value) patch(slot, next)
+    }
+  }
+  return out
+}
+
 /**
  * Normalize one foreign MCP input schema for the harness wire contract.
  *
  * Object-rooted schemas from external servers may omit `required` when no
  * property is mandatory (valid JSON Schema, `required` is optional). Some
  * model gateways treat an absent `required` as `null` and reject the whole
- * request with `null is not of type "array"` for that function. Always
- * materialize the keyword as an explicit array (empty when nothing is
- * required) so the emitted schema is unambiguous for every upstream.
- * Non-object or unparseable schemas are passed through untouched.
+ * request with `null is not of type "array"` for that function — at any
+ * nesting depth. Always materialize the keyword as an explicit array
+ * (empty when nothing is required), recursively, so the emitted schema is
+ * unambiguous for every upstream. Non-object or unparseable schemas are
+ * passed through untouched.
  */
 export function normalizeInputSchema(inputSchema: Record<string, unknown>): Record<string, unknown> {
-  if (inputSchema === null || typeof inputSchema !== 'object' || Array.isArray(inputSchema)) {
-    return inputSchema
-  }
-  if (inputSchema.type === 'object' && !Object.hasOwn(inputSchema, 'required')) {
-    return { ...inputSchema, required: [] }
-  }
-  return inputSchema
+  return normalizeSchemaNode(inputSchema) as Record<string, unknown>
 }
 
 /**

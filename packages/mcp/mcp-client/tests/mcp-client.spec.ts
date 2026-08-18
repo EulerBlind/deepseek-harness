@@ -200,6 +200,71 @@ describe('normalizeInputSchema', () => {
     expect(normalizeInputSchema(null as unknown as Record<string, unknown>)).toBeNull()
     expect(normalizeInputSchema([] as unknown as Record<string, unknown>)).toEqual([])
   })
+
+  it('recursively materializes required arrays on nested objects that omit them', () => {
+    // Gateways reject an absent `required` at any depth (QIA-425), so nested
+    // object nodes inside properties/items must be normalized too.
+    const schema = normalizeInputSchema({
+      type: 'object',
+      properties: {
+        outer: {
+          type: 'object',
+          properties: {
+            inner: { type: 'object', properties: { flag: { type: 'boolean' } } },
+          },
+        },
+        list: { type: 'array', items: { type: 'object', properties: { label: { type: 'string' } } } },
+      },
+    })
+    expect(schema).toEqual({
+      type: 'object',
+      properties: {
+        outer: {
+          type: 'object',
+          properties: {
+            inner: { type: 'object', properties: { flag: { type: 'boolean' } }, required: [] },
+          },
+          required: [],
+        },
+        list: { type: 'array', items: { type: 'object', properties: { label: { type: 'string' } }, required: [] } },
+      },
+      required: [],
+    })
+  })
+
+  it('keeps declared required arrays at nested depth and skips non-object slots', () => {
+    const schema = normalizeInputSchema({
+      type: 'object',
+      required: ['a'],
+      properties: {
+        a: { type: 'object', properties: { x: { type: 'string' } }, required: ['x'] },
+        b: { type: 'object', properties: { y: { type: 'string' } } },
+      },
+      oneOf: [{ type: 'object', properties: { z: { type: 'string' } } }, { type: 'string' }],
+    })
+    expect(schema).toEqual({
+      type: 'object',
+      required: ['a'],
+      properties: {
+        a: { type: 'object', properties: { x: { type: 'string' } }, required: ['x'] },
+        b: { type: 'object', properties: { y: { type: 'string' } }, required: [] },
+      },
+      oneOf: [{ type: 'object', properties: { z: { type: 'string' } }, required: [] }, { type: 'string' }],
+    })
+  })
+
+  it('does not mutate the input schema during normalization', () => {
+    const input: Record<string, unknown> = {
+      type: 'object',
+      properties: { inner: { type: 'object', properties: {} } },
+    }
+    const out = normalizeInputSchema(input)
+    expect(out).not.toBe(input)
+    expect('required' in input).toBe(false)
+    const inner = (input.properties as Record<string, unknown>).inner as Record<string, unknown>
+    expect('required' in inner).toBe(false)
+    expect(((out.properties as Record<string, unknown>).inner as Record<string, unknown>).required).toEqual([])
+  })
 })
 
 describe('syncTools', () => {

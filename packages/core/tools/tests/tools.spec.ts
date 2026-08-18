@@ -2314,7 +2314,9 @@ describe('schema DSL edge cases', () => {
     })
   })
 
-  it('handles nested object with all-optional properties (no required array)', () => {
+  it('materializes an explicit empty required array on nested objects with all-optional properties', () => {
+    // Some gateways treat an absent nested `required` as null and reject the
+    // whole request (QIA-425); every compiled object node must carry it.
     const spec = {
       config: {
         type: 'object',
@@ -2332,9 +2334,40 @@ describe('schema DSL edge cases', () => {
         host: { type: 'string' },
         port: { type: 'number' },
       },
+      required: [],
     })
     const config = jsonSchema.properties['config'] as Record<string, unknown>
-    expect('required' in config).toBe(false)
+    expect(config.required).toEqual([])
+  })
+
+  it('materializes required arrays on nested objects inside array items', () => {
+    const spec = {
+      questions: {
+        type: 'array',
+        required: true,
+        items: {
+          type: 'object',
+          additionalProperties: true,
+          properties: {
+            id: { type: 'string', required: true },
+            header: { type: 'string' },
+            options: {
+              type: 'array',
+              items: {
+                type: 'object',
+                additionalProperties: true,
+                properties: { label: { type: 'string', required: true } },
+              },
+            },
+          },
+        },
+      },
+    } satisfies ParameterSchemaSpec
+    const items = (parameterSchemaSpecToJsonSchema(spec).properties['questions'] as Record<string, unknown>)
+      .items as Record<string, unknown>
+    expect(items.required).toEqual(['id'])
+    const optionsItems = (items.properties as Record<string, unknown>)['options'] as Record<string, unknown>
+    expect((optionsItems.items as Record<string, unknown>).required).toEqual(['label'])
   })
 })
 
