@@ -281,10 +281,13 @@ function runSchemaCompiler(initial: CompileTask): void {
       continue
     }
     if (task.kind === 'property-map-tail') {
-      if (task.required.length > 0) {
-        task.compiled.required = task.required
-        if (task.destination.kind === 'object') task.destination.target.required = task.required
-      }
+      // Always materialize `required` — empty when nothing is mandatory — on
+      // the root AND every nested object node. Some model gateways treat an
+      // absent keyword as null and reject the whole request with
+      // `Invalid schema for function '...': null is not of type "array"`,
+      // including for nested objects (QIA-423 / QIA-425).
+      task.compiled.required = task.required
+      if (task.destination.kind === 'object') task.destination.target.required = task.required
       continue
     }
     if (task.kind === 'property') {
