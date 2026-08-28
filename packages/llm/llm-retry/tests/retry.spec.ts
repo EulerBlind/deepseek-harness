@@ -1047,6 +1047,86 @@ describe('provider-routed retry policy', () => {
     expect(vi.getTimerCount()).toBe(0)
   })
 
+  it('delivers a deterministic action-preview reply once the finite budget is spent', async () => {
+    vi.useFakeTimers()
+    // QIA-426 R1: the action-preview classification is a heuristic, and a
+    // model repeating the same output for the same prompt is the norm rather
+    // than an extreme. Under fail-closed handling this legitimate short reply
+    // was lost entirely (0 assistant/message + turn error + N+1 model calls).
+    // With the real retry executor the budget is spent and the text is then
+    // DELIVERED instead of discarded.
+    // …the residual false-positive shape gap 3 describes: a legitimate
+    // suggestion carrying a bare `--flag value`, no sentence end, no
+    // completion marker. The heuristic cannot tell it from an announcement.
+    const residual = '建议加 --parent 01a0470c'
+    const adapter = new ScriptedAdapter([
+      textResponse(residual),
+      textResponse(residual),
+      textResponse(residual),
+    ])
+    ;({ ctx: context } = await harness(adapter, {
+      mock: normalConfig({ maxRetries: 2, backoff: { initialDelayMs: 1, maxDelayMs: 1 } }),
+    }))
+    const agent = context.agentLoop.create(SessionId('retry-action-preview-failopen'), {
+      provider: 'mock',
+      model: 'mock',
+    })
+    const idle = waitForIdle(context, agent)
+
+    agent.followup(createUserMessage({
+      content: [{ type: 'text', text: 'how do I overwrite' }],
+      source: { kind: 'user' },
+    }))
+    await vi.runAllTimersAsync()
+    await idle
+
+    // 1 initial attempt + maxRetries(2): the budget bounds the cost.
+    expect(adapter.requests).toHaveLength(3)
+    expect(agent.session.events.filter(event => event.type === 'llm/retry')).toHaveLength(2)
+    const messages = agent.session.events.filter(event => event.type === 'assistant/message')
+    expect(messages).toHaveLength(1)
+    expect(messages[0]).toMatchObject({
+      data: { message: { content: [{ type: 'text', text: residual }] } },
+    })
+    expect(agent.session.events.find(event => event.type === 'turn/end')).toMatchObject({
+      type: 'turn/end',
+      data: { reason: { kind: 'completed' } },
+    })
+  })
+
+  it('keeps failing closed on structural breakage when the budget is spent', async () => {
+    vi.useFakeTimers()
+    // Contrast case: an open connector tail keeps QIA-442's fail-closed
+    // disposition, so an exhausted budget ends the turn in error rather than
+    // publishing half a sentence.
+    const adapter = new ScriptedAdapter([
+      textResponse('先看 worktree 状态，'),
+      textResponse('先看 worktree 状态，'),
+    ])
+    ;({ ctx: context } = await harness(adapter, {
+      mock: normalConfig({ maxRetries: 1, backoff: { initialDelayMs: 1, maxDelayMs: 1 } }),
+    }))
+    const agent = context.agentLoop.create(SessionId('retry-truncated-failclosed'), {
+      provider: 'mock',
+      model: 'mock',
+    })
+    const idle = waitForIdle(context, agent)
+
+    agent.followup(createUserMessage({
+      content: [{ type: 'text', text: 'status please' }],
+      source: { kind: 'user' },
+    }))
+    await vi.runAllTimersAsync()
+    await idle
+
+    expect(adapter.requests).toHaveLength(2)
+    expect(agent.session.events.filter(event => event.type === 'assistant/message')).toHaveLength(0)
+    expect(agent.session.events.find(event => event.type === 'turn/end')).toMatchObject({
+      type: 'turn/end',
+      data: { reason: { kind: 'error', error: { code: 'INCOMPLETE_OUTPUT' } } },
+    })
+  })
+
   it('rejects retry policy configured on the executor instead of a provider', () => {
     expectTypeOf<{}>().toExtend<retry.Config>()
     expectTypeOf<{ retryPolicy: { mode: 'always' } }>().not.toExtend<retry.Config>()

@@ -39,7 +39,7 @@ import { RuntimeContextProjection } from './runtime-context.ts'
 import { AssistantStreamAttempt } from './assistant-stream.ts'
 import { SystemPromptProjection } from './runtime-context.ts'
 import { executeToolCalls } from './tool-calls.ts'
-import { isUnfinishedOutput } from './unfinished-output.ts'
+import { classifyUnfinishedOutput } from './unfinished-output.ts'
 
 type Phase =
   | { kind: 'idle'; lastTurn: number }
@@ -537,15 +537,27 @@ export class ReactLoopAgent implements Agent {
           },
         })
         const toolCalls = message.content.filter(block => block.type === 'tool-call')
-        // A `stop` finish with no tool calls is the model's final reply; if it
-        // is plainly cut off (open connector tail) or only placeholder content
-        // (dots/ellipsis), treat it as an incomplete output instead of
-        // completing the turn with a half-written answer — route it through
-        // request recovery (llm-retry) so a fresh attempt can finish the reply.
-        // Refused retries raise so the turn ends in error rather than
-        // surfacing truncated content. Steps that still carry tool calls are
+        // A `stop` finish with no tool calls is the model's final reply. Two
+        // shapes are not deliverable: structural truncation (open connector
+        // tail, placeholder-only dots, reasoning-only stop) and an
+        // action-preview narration (a short text announcing an action that
+        // never ran — a bare `--flag` command preview or a trailing intent
+        // clause ending without sentence-final punctuation, QIA-426 v5). Both
+        // route through request recovery (llm-retry) so a fresh attempt can
+        // produce the real reply. Steps that still carry tool calls are
         // mid-flight and must never be classified this way.
-        if (finish.kind === 'stop' && toolCalls.length === 0 && isUnfinishedOutput(message)) {
+        //
+        // Retry-exhausted disposition depends on the KIND (QIA-426):
+        // - `truncated` fails CLOSED — raising keeps half a sentence out of the
+        //   session, and this classification is a structural fact.
+        // - `action-preview` fails OPEN — the classification is a heuristic, so
+        //   after retries are spent the original text is delivered rather than
+        //   losing what may well be a legitimate short reply. A swallowed reply
+        //   is the same user-visible loss as the leak this guard fixes.
+        const unfinished = finish.kind === 'stop' && toolCalls.length === 0
+          ? classifyUnfinishedOutput(message)
+          : undefined
+        if (unfinished !== undefined) {
           const incomplete = {
             message: 'model output appears incomplete (stop with an open or empty final block)',
             code: INCOMPLETE_OUTPUT_CODE,
@@ -562,10 +574,17 @@ export class ReactLoopAgent implements Agent {
             () => Promise.resolve<RequestErrorAction>(undefined),
           )
           signal.throwIfAborted()
-          if (action?.kind !== 'retry') {
+          if (action?.kind === 'retry') continue
+          if (unfinished === 'truncated') {
             throw new LlmError(incomplete.message, incomplete.code)
           }
-          continue
+          // Fail open: recovery is spent, so deliver the narration instead of
+          // discarding the turn's only content. The log line is the trace that
+          // the guard fired and degraded, since the appended message itself is
+          // indistinguishable from an ordinary final reply.
+          this.ctx.logger.warn(
+            `agent loop turn ${turn} step ${step}: retries exhausted for an action-preview final reply; delivering it as-is`,
+          )
         }
         live.settle(
           'assistant/message',

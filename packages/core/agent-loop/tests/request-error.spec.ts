@@ -287,4 +287,143 @@ describe('agent/request-error', () => {
       data: { reason: { kind: 'completed' } },
     })
   })
+
+  it('retries a stop that ends on an action-preview narration (announced, not executed)', async () => {
+    const adapter = new MockAdapter([
+      textResponse('发布调研+回滚报告（--parent 01a0470c-7ea3-792d-b089-54d6ed004f34）'),
+      textResponse('调研+回滚报告已发布（--parent 01a0470c-7ea3-792d-b089-54d6ed004f34），见附件 reply.md。'),
+    ])
+    const ctx = await harness(adapter)
+    const agent = ctx.agentLoop.create(SessionId('incomplete-output-action-preview-retry'), {
+      provider: 'mock',
+      model: 'mock',
+    })
+    const recoveries: string[] = []
+    ctx.on('agent/request-error', async ({ failure }) => {
+      recoveries.push(failure.code)
+      return { kind: 'retry' }
+    })
+
+    agent.followup(createUserMessage({ content: [{ type: 'text', text: 'go' }], source: { kind: 'user' } }))
+    await agent.whenIdle()
+
+    expect(recoveries).toEqual(['INCOMPLETE_OUTPUT'])
+    expect(adapter.requests).toHaveLength(2)
+    // The preview narration must not be persisted as an assistant message.
+    expect(agent.session.events.filter(event => event.type === 'assistant/message')).toHaveLength(1)
+    expect(agent.session.events.find(event => event.type === 'turn/end')).toMatchObject({
+      type: 'turn/end',
+      data: { reason: { kind: 'completed' } },
+    })
+  })
+
+  it('delivers an action-preview narration when recovery refuses (heuristic fails open)', async () => {
+    const preview = '提交 回滚报告（--parent 01a0470c-7ea3-792d-b089-54d6ed004f34）'
+    const adapter = new MockAdapter([textResponse(preview)])
+    const ctx = await harness(adapter)
+    const agent = ctx.agentLoop.create(SessionId('incomplete-output-action-preview-refused'), {
+      provider: 'mock',
+      model: 'mock',
+    })
+
+    agent.followup(createUserMessage({ content: [{ type: 'text', text: 'go' }], source: { kind: 'user' } }))
+    await agent.whenIdle()
+
+    expect(adapter.requests).toHaveLength(1)
+    // QIA-426: the action-preview classification is a heuristic, so once
+    // recovery is spent the text is delivered rather than lost. Losing a
+    // legitimate short reply is the same user-visible damage as the leak.
+    const messages = agent.session.events.filter(event => event.type === 'assistant/message')
+    expect(messages).toHaveLength(1)
+    expect(messages[0]).toMatchObject({
+      data: { message: { content: [{ type: 'text', text: preview }] } },
+    })
+    expect(agent.session.events.find(event => event.type === 'turn/end')).toMatchObject({
+      type: 'turn/end',
+      data: { reason: { kind: 'completed' } },
+    })
+  })
+
+  it('still fails closed for structural truncation when recovery refuses', async () => {
+    // Contrast with the action-preview case above: an open connector tail is a
+    // structural fact, so a refused retry must not publish half a sentence.
+    const adapter = new MockAdapter([textResponse('先看 worktree 状态，')])
+    const ctx = await harness(adapter)
+    const agent = ctx.agentLoop.create(SessionId('incomplete-output-truncated-refused'), {
+      provider: 'mock',
+      model: 'mock',
+    })
+
+    agent.followup(createUserMessage({ content: [{ type: 'text', text: 'go' }], source: { kind: 'user' } }))
+    await agent.whenIdle()
+
+    expect(agent.session.events.filter(event => event.type === 'assistant/message')).toHaveLength(0)
+    expect(agent.session.events.find(event => event.type === 'turn/end')).toMatchObject({
+      type: 'turn/end',
+      data: { reason: { kind: 'error', error: { code: 'INCOMPLETE_OUTPUT' } } },
+    })
+  })
+
+  it('keeps an inline-code citation reply completed without any retry', async () => {
+    // Acceptance-round shape: backtick citation, no sentence end, no
+    // completion marker — a legitimate short reply, never a preview.
+    const adapter = new MockAdapter([textResponse('运行 `pnpm test` 即可')])
+    const ctx = await harness(adapter)
+    const agent = ctx.agentLoop.create(SessionId('incomplete-output-code-citation'), {
+      provider: 'mock',
+      model: 'mock',
+    })
+    let recoveries = 0
+    ctx.on('agent/request-error', async () => {
+      recoveries += 1
+      return undefined
+    })
+
+    agent.followup(createUserMessage({ content: [{ type: 'text', text: 'go' }], source: { kind: 'user' } }))
+    await agent.whenIdle()
+
+    expect(recoveries).toBe(0)
+    expect(adapter.requests).toHaveLength(1)
+    expect(agent.session.events.filter(event => event.type === 'assistant/message')).toHaveLength(1)
+    expect(agent.session.events.find(event => event.type === 'turn/end')).toMatchObject({
+      type: 'turn/end',
+      data: { reason: { kind: 'completed' } },
+    })
+  })
+
+  it('keeps a completed-action report with a cited option token as a valid final reply', async () => {
+    const adapter = new MockAdapter([textResponse('已发布调研+回滚报告（--parent 01a05c0b-7fc3-792d-b089-54d6ed004f34）。')])
+    const ctx = await harness(adapter)
+    const agent = ctx.agentLoop.create(SessionId('incomplete-output-action-preview-reported'), {
+      provider: 'mock',
+      model: 'mock',
+    })
+
+    agent.followup(createUserMessage({ content: [{ type: 'text', text: 'go' }], source: { kind: 'user' } }))
+    await agent.whenIdle()
+
+    expect(adapter.requests).toHaveLength(1)
+    expect(agent.session.events.find(event => event.type === 'turn/end')).toMatchObject({
+      type: 'turn/end',
+      data: { reason: { kind: 'completed' } },
+    })
+  })
+
+  it('keeps a short instructional one-liner with a CLI flag completed', async () => {
+    const adapter = new MockAdapter([textResponse('用 --force 覆盖即可。')])
+    const ctx = await harness(adapter)
+    const agent = ctx.agentLoop.create(SessionId('incomplete-output-action-preview-instruction'), {
+      provider: 'mock',
+      model: 'mock',
+    })
+
+    agent.followup(createUserMessage({ content: [{ type: 'text', text: 'go' }], source: { kind: 'user' } }))
+    await agent.whenIdle()
+
+    expect(adapter.requests).toHaveLength(1)
+    expect(agent.session.events.find(event => event.type === 'turn/end')).toMatchObject({
+      type: 'turn/end',
+      data: { reason: { kind: 'completed' } },
+    })
+  })
 })
