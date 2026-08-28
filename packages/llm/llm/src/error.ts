@@ -39,6 +39,19 @@ export const QUOTA_EXCEEDED_CODE = 'QUOTA'
 export const EMPTY_RESPONSE_CODE = 'EMPTY_RESPONSE'
 
 /**
+ * Canonical provider-neutral code for a response that stopped normally yet
+ * clearly interrupted the model's own text: the terminal `stop` finish came
+ * back while the assembled text ends on an open connector (`：`, `，`, `、`,
+ * `；`, `…`, `:`, `;`, `,`) or carries only placeholder dots/ellipsis (e.g.
+ * a final `...` with no real content). Providers occasionally emit such a
+ * truncated final message (a stop that is not a real end-of-turn), and
+ * treating it as a completed reply silently publishes half a comment.
+ * Retry policy treats the code as safe to repeat because another attempt
+ * re-runs the same prompt rather than compounding side effects.
+ */
+export const INCOMPLETE_OUTPUT_CODE = 'INCOMPLETE_OUTPUT'
+
+/**
  * Canonical provider-neutral code for a credential that was supplied but
  * cannot be used — malformed rather than absent. Distinct from
  * `MISSING_CREDENTIAL` because the fix differs: correct the stored value

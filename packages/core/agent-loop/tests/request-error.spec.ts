@@ -143,4 +143,148 @@ describe('agent/request-error', () => {
       data: { reason: { kind: 'error' } },
     })
   })
+
+  it('retries a stop finish that leaves the final text on an open connector', async () => {
+    const adapter = new MockAdapter([
+      textResponse('结论：'),
+      textResponse('结论：结果正常，复核通过。'),
+    ])
+    const ctx = await harness(adapter)
+    const agent = await ctx.agentLoop.create(SessionId('request-error-incomplete-retry'), {
+      provider: 'mock',
+      model: 'mock',
+    })
+    const recoveries: string[] = []
+    ctx.on('agent/request-error', async ({ failure }) => {
+      recoveries.push(failure.code)
+      return { kind: 'retry' }
+    })
+
+    agent.followup(createUserMessage({ content: [{ type: 'text', text: 'go' }], source: { kind: 'user' } }))
+    await agent.whenIdle()
+
+    expect(recoveries).toEqual(['INCOMPLETE_OUTPUT'])
+    expect(adapter.requests).toHaveLength(2)
+    const messages = agent.session.snapshotEvents().filter(event => event.type === 'assistant/message')
+    // The truncated first attempt must not be persisted into the session — only
+    // the completed retry answer is appended.
+    expect(messages).toHaveLength(1)
+    expect(agent.session.snapshotEvents().find(event => event.type === 'turn/end')).toMatchObject({
+      type: 'turn/end',
+      data: { reason: { kind: 'completed' } },
+    })
+  })
+
+  it('ends the turn in error when request recovery refuses an incomplete output', async () => {
+    const adapter = new MockAdapter([textResponse('看 /opt/dumate/skills/lark-cli 目录结构和 SKILL.md 位置：')])
+    const ctx = await harness(adapter)
+    const agent = await ctx.agentLoop.create(SessionId('incomplete-output-refused'), {
+      provider: 'mock',
+      model: 'mock',
+    })
+
+    agent.followup(createUserMessage({ content: [{ type: 'text', text: 'go' }], source: { kind: 'user' } }))
+    await agent.whenIdle()
+
+    expect(adapter.requests).toHaveLength(1)
+    // No truncated assistant message may surface from a refused incomplete stop.
+    expect(agent.session.snapshotEvents().filter(event => event.type === 'assistant/message')).toHaveLength(0)
+    expect(agent.session.snapshotEvents().find(event => event.type === 'turn/end')).toMatchObject({
+      type: 'turn/end',
+      data: {
+        reason: {
+          kind: 'error',
+          error: { code: 'INCOMPLETE_OUTPUT' },
+        },
+      },
+    })
+  })
+
+  it('keeps a stop with a proper sentence ending as a completed turn', async () => {
+    const adapter = new MockAdapter([textResponse('已复核完毕。')])
+    const ctx = await harness(adapter)
+    const agent = await ctx.agentLoop.create(SessionId('incomplete-output-false-positive'), {
+      provider: 'mock',
+      model: 'mock',
+    })
+
+    agent.followup(createUserMessage({ content: [{ type: 'text', text: 'go' }], source: { kind: 'user' } }))
+    await agent.whenIdle()
+
+    expect(adapter.requests).toHaveLength(1)
+    expect(agent.session.snapshotEvents().find(event => event.type === 'turn/end')).toMatchObject({
+      type: 'turn/end',
+      data: { reason: { kind: 'completed' } },
+    })
+  })
+
+  it('treats a final reply that is only placeholder dots as incomplete output', async () => {
+    const adapter = new MockAdapter([textResponse('...')])
+    const ctx = await harness(adapter)
+    const agent = await ctx.agentLoop.create(SessionId('incomplete-output-dots'), {
+      provider: 'mock',
+      model: 'mock',
+    })
+
+    agent.followup(createUserMessage({ content: [{ type: 'text', text: 'go' }], source: { kind: 'user' } }))
+    await agent.whenIdle()
+
+    expect(adapter.requests).toHaveLength(1)
+    // No placeholder-only assistant message may surface.
+    expect(agent.session.snapshotEvents().filter(event => event.type === 'assistant/message')).toHaveLength(0)
+    expect(agent.session.snapshotEvents().find(event => event.type === 'turn/end')).toMatchObject({
+      type: 'turn/end',
+      data: {
+        reason: {
+          kind: 'error',
+          error: { code: 'INCOMPLETE_OUTPUT' },
+        },
+      },
+    })
+  })
+
+  it('retries a placeholder-only final reply when recovery returns a retry action', async () => {
+    const adapter = new MockAdapter([
+      textResponse('…'),
+      textResponse('复核通过。'),
+    ])
+    const ctx = await harness(adapter)
+    const agent = await ctx.agentLoop.create(SessionId('incomplete-output-dots-retry'), {
+      provider: 'mock',
+      model: 'mock',
+    })
+    const recoveries: string[] = []
+    ctx.on('agent/request-error', async ({ failure }) => {
+      recoveries.push(failure.code)
+      return { kind: 'retry' }
+    })
+
+    agent.followup(createUserMessage({ content: [{ type: 'text', text: 'go' }], source: { kind: 'user' } }))
+    await agent.whenIdle()
+
+    expect(recoveries).toEqual(['INCOMPLETE_OUTPUT'])
+    expect(adapter.requests).toHaveLength(2)
+    expect(agent.session.snapshotEvents().find(event => event.type === 'turn/end')).toMatchObject({
+      type: 'turn/end',
+      data: { reason: { kind: 'completed' } },
+    })
+  })
+
+  it('keeps short but meaningful final replies completed', async () => {
+    const adapter = new MockAdapter([textResponse('OK')])
+    const ctx = await harness(adapter)
+    const agent = await ctx.agentLoop.create(SessionId('incomplete-output-short-ok'), {
+      provider: 'mock',
+      model: 'mock',
+    })
+
+    agent.followup(createUserMessage({ content: [{ type: 'text', text: 'go' }], source: { kind: 'user' } }))
+    await agent.whenIdle()
+
+    expect(adapter.requests).toHaveLength(1)
+    expect(agent.session.snapshotEvents().find(event => event.type === 'turn/end')).toMatchObject({
+      type: 'turn/end',
+      data: { reason: { kind: 'completed' } },
+    })
+  })
 })

@@ -18,6 +18,7 @@ import type {
 import { agentEvents, assembleContextFor } from '@deepseek-ai/dsh-agent'
 import type { GenerateOptions, LlmCallConfig, Message, PreparedLlmCall } from '@deepseek-ai/dsh-llm'
 import {
+  INCOMPLETE_OUTPUT_CODE,
   LlmError,
   createAssistantMessage,
   errorChain,
@@ -37,6 +38,7 @@ import { RuntimeContextProjection } from './runtime-context.ts'
 import { AssistantStreamAttempt } from './assistant-stream.ts'
 import { SystemPromptProjection } from './runtime-context.ts'
 import { executeToolCalls } from './tool-calls.ts'
+import { isUnfinishedOutput } from './unfinished-output.ts'
 
 type Phase =
   | { kind: 'idle'; lastTurn: number }
@@ -471,6 +473,37 @@ export class ReactLoopAgent implements Agent {
             ...live.replayState !== undefined ? { replayState: live.replayState } : {},
           },
         })
+        const toolCalls = message.content.filter(block => block.type === 'tool-call')
+        // A `stop` finish with no tool calls is the model's final reply; if it
+        // is plainly cut off (open connector tail) or only placeholder content
+        // (dots/ellipsis), treat it as an incomplete output instead of
+        // completing the turn with a half-written answer — route it through
+        // request recovery (llm-retry) so a fresh attempt can finish the reply.
+        // Refused retries raise so the turn ends in error rather than
+        // surfacing truncated content. Steps that still carry tool calls are
+        // mid-flight and must never be classified this way.
+        if (finish.kind === 'stop' && toolCalls.length === 0 && isUnfinishedOutput(message)) {
+          const incomplete = {
+            message: 'model output appears incomplete (stop with an open or empty final block)',
+            code: INCOMPLETE_OUTPUT_CODE,
+          }
+          const action = await this.dispatch.waterfall(
+            'agent/request-error', {
+              turn,
+              step,
+              provider: request.provider,
+              failure: incomplete,
+              retryPolicy: preparedCall?.retryPolicy,
+              signal,
+            },
+            () => Promise.resolve<RequestErrorAction>(undefined),
+          )
+          signal.throwIfAborted()
+          if (action?.kind !== 'retry') {
+            throw new LlmError(incomplete.message, incomplete.code)
+          }
+          continue
+        }
         live.settle(
           'assistant/message',
           () => this.session.append('assistant/message', {
@@ -483,7 +516,6 @@ export class ReactLoopAgent implements Agent {
         )
         if (finish.kind === 'max-tokens') return { kind: 'max-tokens' }
 
-        const toolCalls = message.content.filter(block => block.type === 'tool-call')
         if (toolCalls.length === 0) return { kind: 'completed' }
         const { concluded } = await executeToolCalls(
           this.loopCtx, turn, step, toolCalls, signal,
