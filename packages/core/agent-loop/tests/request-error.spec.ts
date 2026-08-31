@@ -522,4 +522,41 @@ describe('agent/request-error', () => {
       data: { reason: { kind: 'completed' } },
     })
   })
+
+  // ── QIA-426 v5: trailing intent clause (2026-08-31 N7/N8 中断) ─────────────
+
+  it('retries a stop whose final clause narrates an unexecuted follow-up intent', async () => {
+    // Production N7 (task 01a05698, 14:54): `stop` with a short final text
+    // leading a next step ("先下载…检查环境工") that never runs — the model
+    // narrated the work it claimed it was about to do and stopped.
+    const preview = 'N7 任务明确：①CR 归属判定（查服务器镜像构建来源分支）②4 项配置核查（K104 vs K238）③连接器健康盘点。先下载 v5 契约并检查环境工'
+    const adapter = new MockAdapter([
+      textResponse(preview),
+      textResponse('N7 已完成：分派范围内所有核查项已定案并回报 BA。'),
+    ])
+    const ctx = await harness(adapter)
+    const agent = ctx.agentLoop.create(SessionId('incomplete-output-intent-clause-retry'), {
+      provider: 'mock',
+      model: 'mock',
+    })
+    const recoveries: string[] = []
+    ctx.on('agent/request-error', async ({ failure }) => {
+      recoveries.push(failure.code)
+      return { kind: 'retry' }
+    })
+
+    agent.followup(createUserMessage({ content: [{ type: 'text', text: 'go' }], source: { kind: 'user' } }))
+    await agent.whenIdle()
+
+    expect(recoveries).toEqual(['INCOMPLETE_OUTPUT'])
+    expect(adapter.requests).toHaveLength(2)
+    // The narrating attempt must not be persisted — only the completed reply.
+    const messages = agent.session.events.filter(event => event.type === 'assistant/message')
+    expect(messages).toHaveLength(1)
+    expect(messages[0]).toMatchObject({ data: { message: { content: [{ type: 'text', text: 'N7 已完成：分派范围内所有核查项已定案并回报 BA。' }] } } })
+    expect(agent.session.events.find(event => event.type === 'turn/end')).toMatchObject({
+      type: 'turn/end',
+      data: { reason: { kind: 'completed' } },
+    })
+  })
 })

@@ -181,4 +181,61 @@ describe('classifyUnfinishedOutput · action-preview narration (QIA-426)', () =>
       createAssistantMessage({ content: [], source: { provider: 'mock', model: 'mock' } }),
     )).toBeUndefined()
   })
+
+  // ── QIA-426 v5: trailing intent clause (2026-08-31 N7/N8 中断) ─────────────
+
+  it('detects N7: final clause leads with intent 先下载… and cut mid-word', () => {
+    // Production 08-31 14:54 turn 7 final text (task 01a05698, 180B): the model
+    // wrote "N7 任务明确：…先下载 v5 契约并检查环境工" — a narration of the
+    // next action that never ran, no terminal punctuation, stop finish.
+    const text = 'N7 任务明确：①CR 归属判定（查服务器镜像构建来源分支）②4 项配置核查（K104 vs K238）③连接器健康盘点。先下载 v5 契约并检查环境工'
+    expect(classifyUnfinishedOutput(finalText(text))).toBe('action-preview')
+  })
+
+  it('detects N8: final clause leads with 查 and stops before doing it', () => {
+    // Production 08-31 15:56 turn 8 step 36 (task 01a056cf, 179B): the model
+    // said "查 mcp.ts — 看它怎么构造 header 转发请求" and stopped without a
+    // read tool call — the action the narration announced never ran.
+    const text = 'qianfan-desk 有完整 MCP 实现。查 `server/src/server/routes/mcp.ts` 和 `sandbox/bridges/mcp.ts`——这是引擎侧 MCP 调用入口，看它怎么构造 header 转发请求'
+    expect(classifyUnfinishedOutput(finalText(text))).toBe('action-preview')
+  })
+
+  it('false-positive guard: sentences closed by a completion particle stay deliverable', () => {
+    // Same尾 shape but the clause closes itself — the reply is a deliverable
+    // even without 。: completion particles (即可/就行/没问题/可以…) and
+    // completion markers (已/完成/成功) declare the state instead of
+    // promising one.
+    expect(classifyUnfinishedOutput(finalText('先看一下再给你结论即可'))).toBeUndefined()
+    expect(classifyUnfinishedOutput(finalText('先跑 `pnpm test` 就行'))).toBeUndefined()
+    expect(classifyUnfinishedOutput(finalText('接下来执行 `pnpm build` 即可'))).toBeUndefined()
+    expect(classifyUnfinishedOutput(finalText('先查 `git log --oneline -1` 的输出'))).toBeUndefined()
+    expect(classifyUnfinishedOutput(finalText('下一步已完成，等 CI 结果'))).toBeUndefined()
+  })
+
+  it('false-positive guard: statements starting with 检查/确认/分析 but reporting a state stay deliverable', () => {
+    // 检查/确认/分析 can also open a *statement* about a fact, not an
+    // unfulfilled promise — the completion mark or a closed sentence is the
+    // difference.
+    expect(classifyUnfinishedOutput(finalText('确认无误。'))).toBeUndefined()
+    expect(classifyUnfinishedOutput(finalText('检查发现无异常'))).toBeUndefined()
+    expect(classifyUnfinishedOutput(finalText('分析结果已写入 report.md'))).toBeUndefined()
+    expect(classifyUnfinishedOutput(finalText('确认会有影响，需要知会用户'))).toBeUndefined()
+  })
+
+  it('length guard: an intent-lead final clause longer than the cap is real content', () => {
+    // Only the FINAL CLAUSE is length-bounded — a clause > 120 chars leading
+    // with 先 is a report whose sentence simply has no trailing punctuation,
+    // not a preview.
+    const clause = '下载契约附件并检查环境工作目录中的相关配置与连接器状态信息后给出结论与后续建议安排'
+    const text = '报告很长的前置说明。' + '先' + clause.repeat(3)
+    const tail = text.split(/[。！？.!?]/u).pop() ?? ''
+    expect(tail.length).toBeGreaterThan(120)
+    expect(classifyUnfinishedOutput(finalText(text))).toBeUndefined()
+  })
+
+  it('tail extraction empties: a text ending in closing punctuation is not an intent lead', () => {
+    // Sentence-final punctuation bails earlier; make sure the interplay stays
+    // deliverable for a text that contains 、 and ： but closes normally.
+    expect(classifyUnfinishedOutput(finalText('先查看：内容不再有异常。'))).toBeUndefined()
+  })
 })

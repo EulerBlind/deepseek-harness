@@ -102,18 +102,51 @@ const CODE_SPAN = /`[^`\n]*`/gu
  */
 const COMPLETION_MARKER = /已|完成|成功|确认|可见|入队|posted|done|finished|submitted|updated|ok\b/iu
 
-/** A short final narration whose only "content" is an unfulfilled action preview. */
+/**
+ * A short final narration whose only "content" is an unfulfilled action preview.
+ * Two shapes qualify:
+ *
+ * 1. a command preview citing a bare `--flag value` (QIA-426) — the text ends
+ *    right after its argument (`发布调研+回滚报告（--parent …）`), no tool
+ *    call ever runs it;
+ * 2. a trailing intent clause (QIA-426 v5): the text ends WITHOUT any
+ *    sentence-final punctuation and its final clause *leads* with an intent
+ *    verb (先/再/接着/检查/查/下载/分析…), i.e. the model narrates "I am
+ *    about to do X" and then stops instead of doing it. Production shapes
+ *    (08-31 N7/N8 中断，均 ~180B 收尾): `N7 任务明确：…先下载 v5 契约并检查环境工`
+ *    and `…查 mcp.ts — 看它怎么构造 header 转发请求`. The guard is NOT a
+ *    generic "no terminal punctuation" test — a short statement that closes
+ *    its clause with a completion particle (即可/就行/OK/done) or a backtick
+ *    citation is a deliverable reply and must survive.
+ */
 function isActionPreview(text: string): boolean {
   const trimmed = text.trim()
   if (trimmed.length === 0) return false
-  if (trimmed.length > ACTION_PREVIEW_MAX_CHARS) return false
   // A real answer closes its sentence (e.g. `用 --force 覆盖即可。`); an
-  // unfulfilled narration ends right after its argument (`…（--parent …）`).
+  // unfulfilled narration ends right after its connector (`…（--parent …）`)
+  // or leaves its final clause without a sentence-final punctuation.
   if (/[。！？.!?]$/u.test(trimmed)) return false
-  // The announcement must cite an executable flag OUTSIDE any code span…
-  if (!COMMAND_FLAG.test(trimmed.replace(CODE_SPAN, ' '))) return false
   // …and must NOT be a report of an action that already happened.
-  return !COMPLETION_MARKER.test(trimmed)
+  if (COMPLETION_MARKER.test(trimmed)) return false
+  const stripped = trimmed.replace(CODE_SPAN, ' ')
+  // Shape 1: announce a bare `--flag value` outside any code span — only
+  // when the whole utterance stays short (a long text carrying a flag is a
+  // real walkthrough, not a preview).
+  if (trimmed.length <= ACTION_PREVIEW_MAX_CHARS && COMMAND_FLAG.test(stripped)) return true
+  // Shape 2: the FINAL clause (text after the last sentence-final
+  // punctuation) *starts* with an intent lead and has no completion marker —
+  // the model wrote "let me go do X" and stopped instead of doing it. A
+  // trailing backtick citation (`` `gh auth login` ``) is not an intent lead,
+  // nor is a clause closed by a completion particle (即可/就行/没问题…) or a
+  // citation noun (…的输出/…的结果 — "look at X's output" answers the user
+  // instead of promising a self-action). Only the clause itself is
+  // length-bounded, so a long report whose last clause is an unfulfilled
+  // promise is still caught.
+  const tailClause = stripped.split(/[。！？.!?]/u).slice(-1).join('').trimStart()
+  if (tailClause.length > ACTION_PREVIEW_MAX_CHARS) return false
+  if (/即可|就行|没问题|好了|行吧|OK|ok$|的输出$|的结果$/u.test(tailClause)) return false
+  const intentLead = /^(?:先|接着|接下来|下一步|随后|再|继续|去|查(?!询)|下载|读取|获取|打开|跑|试|验证)/u
+  return intentLead.test(tailClause)
 }
 
 /**
@@ -151,7 +184,13 @@ export type UnfinishedOutputKind = 'truncated' | 'action-preview'
  *    `stop && zero tool calls` guard is a second line).
  * 2. text that is only placeholder dots / an open connector tail →
  *    `truncated` (QIA-442).
- * 3. a short action-preview narration → `action-preview` (QIA-426).
+ * 3. an action-preview diction — the model announces the action it claims it
+ *    is about to take but no tool call ever runs it:
+ *    - citing a bare `--flag value` (QIA-426), or
+ *    - a trailing intent clause ending without sentence-final punctuation
+ *      (QIA-426 v5, production N7/N8 中断 2026-08-31: `先下载 v5 契约并检查环境工`
+ *      `/ 查 mcp.ts — 看它怎么构造 header 转发请求`).
+ *    → `action-preview`, which fails OPEN on exhausted retries.
  *
  * A genuinely empty message (`content: []`) is NOT classified here: the
  * adapters turn a terminal stop with no content into `EMPTY_RESPONSE` before
