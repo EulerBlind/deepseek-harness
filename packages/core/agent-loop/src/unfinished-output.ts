@@ -103,6 +103,38 @@ const CODE_SPAN = /`[^`\n]*`/gu
 const COMPLETION_MARKER = /已|完成|成功|确认|可见|入队|posted|done|finished|submitted|updated|ok\b/iu
 
 /**
+ * Sentence-final boundaries for the tail-clause split: CJK sentence ends
+ * (。！？) and half-width !? are always boundaries; ASCII `.` is a boundary
+ * ONLY when preceded by a non-alphanumeric char and followed by whitespace
+ * or end — so `dir/file.ext`、`xx.yy` identifiers are never cut at their
+ * dot (production N8 08-31 leaked for exactly this: the bare path
+ * `sandbox/bridges/mcp.ts` was split at `.` and the tail clause started with
+ * `ts`), while an English sentence-final period followed by a space IS a
+ * boundary.
+ */
+const SENTENCE_BOUNDARY = /[。！？!?]|(?<![A-Za-z0-9])\.(?=\s|$)/u
+
+/**
+ * A completed ABSENCE report (QIA-426 v5 rework): the final clause carries
+ * the check's RESULT — the queried thing is not there (查不到/日志里没有该
+ * 记录/没有调用记录/去沙箱 pod 里看过，没有该文件). That is a deliverable
+ * answer, unlike the unfulfilled promise shape, so the intent-lead rule must
+ * not fire on clauses that open with 查/看/去 but end in a negative finding.
+ * Deliberately matches NOUN-anchored absence only (记录/文件/日志/数据/
+ * 调用/内容/痕迹…) — a bare 没有/无/未 alone (e.g. 有没有该文件) keeps the
+ * promise reading and stays classified.
+ */
+const ABSENT_RESULT_MARKER = new RegExp(
+  '(?:查不到|找不到|没找到|未找到|没查到|未查到|不存在|查无结果)'
+  // （「有」字面领起的疑问句保持为意向，见注释）
+  + '|(?<![\\u6709])(?:没有|无)(?:该|这个|任何|相关|一条|一行|一例)?'
+  + '(?:记录|文件|日志|数据|内容|指令|调用|痕迹|迹象|线索|输出|结果|配置|信息|pod|条目)'
+  + '|(?<![\\u6709])未(?:找到|发现|查到|看到|输出|出现|执行|设置)'
+  + '|(?:未|不)见',
+  'iu',
+)
+
+/**
  * A short final narration whose only "content" is an unfulfilled action preview.
  * Two shapes qualify:
  *
@@ -142,9 +174,11 @@ function isActionPreview(text: string): boolean {
   // instead of promising a self-action). Only the clause itself is
   // length-bounded, so a long report whose last clause is an unfulfilled
   // promise is still caught.
-  const tailClause = stripped.split(/[。！？.!?]/u).slice(-1).join('').trimStart()
-  if (tailClause.length > ACTION_PREVIEW_MAX_CHARS) return false
+  const tailClause = stripped.split(SENTENCE_BOUNDARY).slice(-1).join('').trimStart()
+  if (tailClause.length === 0 || tailClause.length > ACTION_PREVIEW_MAX_CHARS) return false
   if (/即可|就行|没问题|好了|行吧|OK|ok$|的输出$|的结果$/u.test(tailClause)) return false
+  if (/^(?:没有|无|未见|未发现|未找到|查不到|找不到|不存在)/u.test(tailClause)) return false
+  if (ABSENT_RESULT_MARKER.test(tailClause)) return false
   const intentLead = /^(?:先|接着|接下来|下一步|随后|再|继续|去|查(?!询)|下载|读取|获取|打开|跑|试|验证)/u
   return intentLead.test(tailClause)
 }

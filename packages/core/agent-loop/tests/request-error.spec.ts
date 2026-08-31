@@ -553,7 +553,71 @@ describe('agent/request-error', () => {
     // The narrating attempt must not be persisted — only the completed reply.
     const messages = agent.session.events.filter(event => event.type === 'assistant/message')
     expect(messages).toHaveLength(1)
-    expect(messages[0]).toMatchObject({ data: { message: { content: [{ type: 'text', text: 'N7 已完成：分派范围内所有核查项已定案并回报 BA。' }] } } })
+    expect(messages[0]).toMatchObject({
+      data: { message: { content: [{ type: 'text', text: 'N7 已完成：分派范围内所有核查项已定案并回报 BA。' }] } },
+    })
+    expect(agent.session.events.find(event => event.type === 'turn/end')).toMatchObject({
+      type: 'turn/end',
+      data: { reason: { kind: 'completed' } },
+    })
+  })
+
+  it('retries the production N8 raw bytes (bare dotted path in the tail)', async () => {
+    // Byte-identical to session.jsonl.zstd turn 8 step 36 (task 01a056cf).
+    // The second path sandbox/bridges/mcp.ts is NOT backticked — its dot must
+    // not be eaten as a sentence boundary (v5 rework).
+    const preview = 'qianfan-desk 有完整 MCP 实现。查 `server/src/server/routes/mcp.ts` 和 sandbox/bridges/mcp.ts——这是引擎侧 MCP 调用入口，看它怎么构造 header 转发请求'
+    const adapter = new MockAdapter([
+      textResponse(preview),
+      textResponse('结论：引擎侧入口已定位在 sandbox/bridges/mcp.ts。'),
+    ])
+    const ctx = await harness(adapter)
+    const agent = ctx.agentLoop.create(SessionId('incomplete-output-n8-raw-retry'), {
+      provider: 'mock',
+      model: 'mock',
+    })
+    const recoveries: string[] = []
+    ctx.on('agent/request-error', async ({ failure }) => {
+      recoveries.push(failure.code)
+      return { kind: 'retry' }
+    })
+
+    agent.followup(createUserMessage({ content: [{ type: 'text', text: 'go' }], source: { kind: 'user' } }))
+    await agent.whenIdle()
+
+    expect(recoveries).toEqual(['INCOMPLETE_OUTPUT'])
+    expect(adapter.requests).toHaveLength(2)
+    const messages = agent.session.events.filter(event => event.type === 'assistant/message')
+    expect(messages).toHaveLength(1)
+    expect(messages[0]).toMatchObject({
+      data: { message: { content: [{ type: 'text', text: '结论：引擎侧入口已定位在 sandbox/bridges/mcp.ts。' }] } },
+    })
+    expect(agent.session.events.find(event => event.type === 'turn/end')).toMatchObject({
+      type: 'turn/end',
+      data: { reason: { kind: 'completed' } },
+    })
+  })
+
+  it('keeps absence-report final replies (查不到/没有该文件) completed without retries', async () => {
+    // BA negatives: the check's RESULT is a deliverable — no INCOMPLETE_OUTPUT
+    // recovery may fire for "查了，没有该记录" reports (v5 rework).
+    const adapter = new MockAdapter([textResponse('查不到，日志里没有该记录')])
+    const ctx = await harness(adapter)
+    const agent = ctx.agentLoop.create(SessionId('incomplete-output-absent-report'), {
+      provider: 'mock',
+      model: 'mock',
+    })
+    let recoveries = 0
+    ctx.on('agent/request-error', async () => {
+      recoveries += 1
+      return undefined
+    })
+
+    agent.followup(createUserMessage({ content: [{ type: 'text', text: 'go' }], source: { kind: 'user' } }))
+    await agent.whenIdle()
+
+    expect(recoveries).toBe(0)
+    expect(adapter.requests).toHaveLength(1)
     expect(agent.session.events.find(event => event.type === 'turn/end')).toMatchObject({
       type: 'turn/end',
       data: { reason: { kind: 'completed' } },

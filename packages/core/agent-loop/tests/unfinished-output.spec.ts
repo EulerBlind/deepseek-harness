@@ -192,12 +192,22 @@ describe('classifyUnfinishedOutput · action-preview narration (QIA-426)', () =>
     expect(classifyUnfinishedOutput(finalText(text))).toBe('action-preview')
   })
 
-  it('detects N8: final clause leads with 查 and stops before doing it', () => {
-    // Production 08-31 15:56 turn 8 step 36 (task 01a056cf, 179B): the model
-    // said "查 mcp.ts — 看它怎么构造 header 转发请求" and stopped without a
-    // read tool call — the action the narration announced never ran.
-    const text = 'qianfan-desk 有完整 MCP 实现。查 `server/src/server/routes/mcp.ts` 和 `sandbox/bridges/mcp.ts`——这是引擎侧 MCP 调用入口，看它怎么构造 header 转发请求'
+  it('detects N8 with PRODUCTION bytes: bare dotted path after the backtick span', () => {
+    // Production 08-31 15:56 turn 8 step 36 (task 01a056cf, 179B, bytes taken
+    // from session.jsonl.zstd): only the FIRST path is backticked; the second
+    // `sandbox/bridges/mcp.ts` is BARE — its `.` must not be treated as a
+    // sentence boundary (v5 rework). The model said "查 mcp.ts — 看它怎么构造
+    // header 转发请求" and stopped without a read tool call.
+    const text = 'qianfan-desk 有完整 MCP 实现。查 `server/src/server/routes/mcp.ts` 和 sandbox/bridges/mcp.ts——这是引擎侧 MCP 调用入口，看它怎么构造 header 转发请求'
     expect(classifyUnfinishedOutput(finalText(text))).toBe('action-preview')
+  })
+
+  it('never splits inside a bare dotted identifier in the tail clause', () => {
+    // Regression for the v5 rework defect: `dir/file.ext` and `xx.yy` tokens
+    // keep their dot — the boundary regex must not cut at `mcp.ts`, `lark.js`,
+    // or `v1.2.3`. An intent lead 查/先 before such a path stays classified.
+    expect(classifyUnfinishedOutput(finalText('查 sandbox/bridges/mcp.ts 的实现，看它怎么转发'))).toBe('action-preview')
+    expect(classifyUnfinishedOutput(finalText('先看 lark.js 的位置，然后'))).toBe('action-preview')
   })
 
   it('false-positive guard: sentences closed by a completion particle stay deliverable', () => {
@@ -210,6 +220,18 @@ describe('classifyUnfinishedOutput · action-preview narration (QIA-426)', () =>
     expect(classifyUnfinishedOutput(finalText('接下来执行 `pnpm build` 即可'))).toBeUndefined()
     expect(classifyUnfinishedOutput(finalText('先查 `git log --oneline -1` 的输出'))).toBeUndefined()
     expect(classifyUnfinishedOutput(finalText('下一步已完成，等 CI 结果'))).toBeUndefined()
+  })
+
+  it('false-positive guard: 查不到/没有该文件 absence reports are deliverable', () => {
+    // QIA-426 v5 rework (BA negatives): clauses that REPORT a check's RESULT
+    // ("查了，不在") answer the user even without 。 — 查不到 / 日志里没有该
+    // 记录 / 没有调用记录 / 去 pod 看过没有该文件 are completed statements,
+    // not unfulfilled should-be promises. The ？-form 有没有 (a pending
+    // check) stays classified.
+    expect(classifyUnfinishedOutput(finalText('查不到，日志里没有该记录'))).toBeUndefined()
+    expect(classifyUnfinishedOutput(finalText('查看 mcp-executor 的日志，发现没有调用记录'))).toBeUndefined()
+    expect(classifyUnfinishedOutput(finalText('去沙箱 pod 里看过，没有该文件'))).toBeUndefined()
+    expect(classifyUnfinishedOutput(finalText('先看一下有没有该文件'))).toBe('action-preview')
   })
 
   it('false-positive guard: statements starting with 检查/确认/分析 but reporting a state stay deliverable', () => {
