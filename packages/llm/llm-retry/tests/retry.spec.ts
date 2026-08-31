@@ -80,6 +80,16 @@ function textResponse(text: string): StreamChunk[] {
   ]
 }
 
+/** A `stop` stream carrying only a reasoning block and no visible text. */
+function reasoningResponse(text: string): StreamChunk[] {
+  return [
+    { type: 'block-start', index: 0, blockType: 'reasoning' },
+    { type: 'reasoning-delta', index: 0, text },
+    { type: 'block-end', index: 0, block: { type: 'reasoning', text } },
+    { type: 'finish', reason: { kind: 'stop' } },
+  ]
+}
+
 /**
  * A degenerate empty provider completion as an error finish chunk. Both
  * adapters emit this shape and the EMPTY_RESPONSE code (the field the policy
@@ -1114,6 +1124,41 @@ describe('provider-routed retry policy', () => {
 
     agent.followup(createUserMessage({
       content: [{ type: 'text', text: 'status please' }],
+      source: { kind: 'user' },
+    }))
+    await vi.runAllTimersAsync()
+    await idle
+
+    expect(adapter.requests).toHaveLength(2)
+    expect(agent.session.events.filter(event => event.type === 'assistant/message')).toHaveLength(0)
+    expect(agent.session.events.find(event => event.type === 'turn/end')).toMatchObject({
+      type: 'turn/end',
+      data: { reason: { kind: 'error', error: { code: 'INCOMPLETE_OUTPUT' } } },
+    })
+  })
+
+  it('fails closed on a deterministic reasoning-only stop once the budget is spent', async () => {
+    vi.useFakeTimers()
+    // QIA-426 v4: a reasoning-only stop (no visible text, no tool calls) is a
+    // structural fact — the model thought but left no reply. A model repeating
+    // the same reasoning for the same prompt is the norm, so the budget is
+    // spent and the turn ends in error; no empty/reasoning stub may surface.
+    const thought = 'Let me find the pod and test its outbound reachability.'
+    const adapter = new ScriptedAdapter([
+      reasoningResponse(thought),
+      reasoningResponse(thought),
+    ])
+    ;({ ctx: context } = await harness(adapter, {
+      mock: normalConfig({ maxRetries: 1, backoff: { initialDelayMs: 1, maxDelayMs: 1 } }),
+    }))
+    const agent = context.agentLoop.create(SessionId('retry-reasoning-only-failclosed'), {
+      provider: 'mock',
+      model: 'mock',
+    })
+    const idle = waitForIdle(context, agent)
+
+    agent.followup(createUserMessage({
+      content: [{ type: 'text', text: 'check the pod' }],
       source: { kind: 'user' },
     }))
     await vi.runAllTimersAsync()

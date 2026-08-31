@@ -8,7 +8,7 @@ import type { LlmFailure, ResolvedRetryPolicy } from '@deepseek-ai/dsh-llm'
 import SessionStore, { SessionId } from '@deepseek-ai/dsh-session'
 import SystemPrompt from '@deepseek-ai/dsh-system-prompt'
 import ToolRuntime from '@deepseek-ai/dsh-tools'
-import { MockAdapter, textResponse } from './mock-adapter.ts'
+import { MockAdapter, reasoningResponse, textResponse } from './mock-adapter.ts'
 
 async function harness(adapter: MockAdapter): Promise<Context> {
   const ctx = new Context()
@@ -421,6 +421,102 @@ describe('agent/request-error', () => {
     await agent.whenIdle()
 
     expect(adapter.requests).toHaveLength(1)
+    expect(agent.session.events.find(event => event.type === 'turn/end')).toMatchObject({
+      type: 'turn/end',
+      data: { reason: { kind: 'completed' } },
+    })
+  })
+
+  // ── QIA-426 v4: reasoning-only stop shapes ────────────────────────────────
+
+  it('retries a reasoning-only stop that never produced visible text', async () => {
+    const adapter = new MockAdapter([
+      reasoningResponse('Let me find the pod and test its outbound reachability.'),
+      textResponse('结论：根因已复核，证据链充分。'),
+    ])
+    const ctx = await harness(adapter)
+    const agent = ctx.agentLoop.create(SessionId('incomplete-output-reasoning-only-retry'), {
+      provider: 'mock',
+      model: 'mock',
+    })
+    const recoveries: string[] = []
+    ctx.on('agent/request-error', async ({ failure }) => {
+      recoveries.push(failure.code)
+      return { kind: 'retry' }
+    })
+
+    agent.followup(createUserMessage({ content: [{ type: 'text', text: 'go' }], source: { kind: 'user' } }))
+    await agent.whenIdle()
+
+    expect(recoveries).toEqual(['INCOMPLETE_OUTPUT'])
+    expect(adapter.requests).toHaveLength(2)
+    // The reasoning-only attempt must not be persisted — only the real reply.
+    const messages = agent.session.events.filter(event => event.type === 'assistant/message')
+    expect(messages).toHaveLength(1)
+    expect(messages[0]).toMatchObject({
+      data: { message: { content: [{ type: 'text', text: '结论：根因已复核，证据链充分。' }] } },
+    })
+    expect(agent.session.events.find(event => event.type === 'turn/end')).toMatchObject({
+      type: 'turn/end',
+      data: { reason: { kind: 'completed' } },
+    })
+  })
+
+  it('ends a reasoning-only stop in error when recovery refuses, persisting no stub', async () => {
+    const adapter = new MockAdapter([reasoningResponse('Let me think about this.')])
+    const ctx = await harness(adapter)
+    const agent = ctx.agentLoop.create(SessionId('incomplete-output-reasoning-only-refused'), {
+      provider: 'mock',
+      model: 'mock',
+    })
+
+    agent.followup(createUserMessage({ content: [{ type: 'text', text: 'go' }], source: { kind: 'user' } }))
+    await agent.whenIdle()
+
+    expect(adapter.requests).toHaveLength(1)
+    // No empty string / reasoning stub may be persisted as an assistant message.
+    expect(agent.session.events.filter(event => event.type === 'assistant/message')).toHaveLength(0)
+    expect(agent.session.events.find(event => event.type === 'turn/end')).toMatchObject({
+      type: 'turn/end',
+      data: {
+        reason: {
+          kind: 'error',
+          error: { code: 'INCOMPLETE_OUTPUT' },
+        },
+      },
+    })
+  })
+
+  it('keeps a reasoning + text normal stop completed without any retry', async () => {
+    // Regression guard for the v4 risk: a normal thinking-chain answer that
+    // ends with visible text must never be judged unfinished.
+    const adapter = new MockAdapter([[
+      { type: 'block-start', index: 0, blockType: 'reasoning' },
+      { type: 'reasoning-delta', index: 0, text: 'Let me check the pod.' },
+      { type: 'block-end', index: 0, block: { type: 'reasoning', text: 'Let me check the pod.' } },
+      { type: 'block-start', index: 1, blockType: 'text' },
+      { type: 'text-delta', index: 1, text: '结论：复核通过。' },
+      { type: 'block-end', index: 1, block: { type: 'text', text: '结论：复核通过。' } },
+      { type: 'usage', usage: { inputTokens: 10, outputTokens: 4 } },
+      { type: 'finish', reason: { kind: 'stop' } },
+    ]])
+    const ctx = await harness(adapter)
+    const agent = ctx.agentLoop.create(SessionId('incomplete-output-reasoning-text-ok'), {
+      provider: 'mock',
+      model: 'mock',
+    })
+    let recoveries = 0
+    ctx.on('agent/request-error', async () => {
+      recoveries += 1
+      return undefined
+    })
+
+    agent.followup(createUserMessage({ content: [{ type: 'text', text: 'go' }], source: { kind: 'user' } }))
+    await agent.whenIdle()
+
+    expect(recoveries).toBe(0)
+    expect(adapter.requests).toHaveLength(1)
+    expect(agent.session.events.filter(event => event.type === 'assistant/message')).toHaveLength(1)
     expect(agent.session.events.find(event => event.type === 'turn/end')).toMatchObject({
       type: 'turn/end',
       data: { reason: { kind: 'completed' } },

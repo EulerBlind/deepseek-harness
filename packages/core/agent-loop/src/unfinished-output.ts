@@ -12,15 +12,19 @@
  *
  * The agent loop turns all of these into an `INCOMPLETE_OUTPUT` request
  * failure so the retry policy can re-run the step instead of letting a
- * half-written reply surface (e.g. to a comment thread). The two kinds differ
+ * half-written reply surface (e.g. to a comment thread). The kinds differ
  * once retries are exhausted — structural truncation fails closed (turn
  * error), the action-preview heuristic fails open (deliver the text) — see
  * {@link UnfinishedOutputKind}.
  *
- * A strictly empty response is NOT treated as incomplete here: adapters
- * already classify a terminal stop with no content as `EMPTY_RESPONSE`, and
- * an empty `stop` reaching the loop is a legitimate durable-call boundary for
- * replay consumers.
+ * A text-less final message is treated as unfinished when it carries content
+ * that is invisible to the user (e.g. a reasoning-only stop: the model
+ * thought but never produced a visible reply — QIA-426 v4). The classifier
+ * requires **zero tool-call blocks** so a mid-flight tool step is never
+ * misclassified, and it preserves the durable-call boundary for a genuinely
+ * **empty** stop (`content: []`): adapters already classify a terminal stop
+ * with no content as `EMPTY_RESPONSE`, and an empty `stop` reaching the loop
+ * is a legitimate durable-call boundary for replay consumers.
  *
  * @module dsh-agent-loop/unfinished-output
  */
@@ -117,10 +121,11 @@ function isActionPreview(text: string): boolean {
  * the loop must dispose of it once retries are exhausted.
  *
  * - `truncated`: a **structural** fact. The text is physically cut off (open
- *   connector tail) or carries no content at all (placeholder dots).
- *   Misjudgment probability is negligible, so the loop keeps QIA-442's
- *   fail-closed handling: exhausted retries end the turn in error rather than
- *   publishing half a sentence.
+ *   connector tail), carries no content at all (placeholder dots), or was
+ *   never produced in the first place (a reasoning-only stop — the model
+ *   thought but its turn has no visible reply). Misjudgment probability is
+ *   negligible, so the loop keeps QIA-442's fail-closed handling: exhausted
+ *   retries end the turn in error rather than publishing half a sentence.
  * - `action-preview`: a **semantic heuristic**. The text is syntactically
  *   whole but announces an action that never ran. Misjudgment probability is
  *   not negligible (a legitimate short reply can look like this), so the loop
@@ -138,12 +143,36 @@ export type UnfinishedOutputKind = 'truncated' | 'action-preview'
  * kind — the kind decides the retry-exhausted disposition, see
  * {@link UnfinishedOutputKind}.
  *
+ * Three shapes are unfinished:
+ * 1. a reasoning-only stop (text-less, non-empty, no tool calls) →
+ *    `truncated`: the model thought but never produced a reply the user can
+ *    read. Tool-call-only content is mid-flight and is NEVER classified here
+ *    (the classifier itself enforces zero tool-call blocks — the caller's
+ *    `stop && zero tool calls` guard is a second line).
+ * 2. text that is only placeholder dots / an open connector tail →
+ *    `truncated` (QIA-442).
+ * 3. a short action-preview narration → `action-preview` (QIA-426).
+ *
+ * A genuinely empty message (`content: []`) is NOT classified here: the
+ * adapters turn a terminal stop with no content into `EMPTY_RESPONSE` before
+ * it reaches the loop, and a truly empty stop that does reach it is a
+ * legitimate durable-call boundary for replay consumers.
+ *
  * @param message - the assembled assistant message (text/tool-call blocks).
  * @returns the unfinished kind, or `undefined` for a deliverable final reply.
  */
 export function classifyUnfinishedOutput(message: Message): UnfinishedOutputKind | undefined {
   const texts = message.content.filter((block): block is TextBlock => block.type === 'text')
-  if (texts.length === 0) return undefined
+  if (texts.length === 0) {
+    // Text-less but non-empty content: only a reasoning-only stop is
+    // unfinished (the model thought but left no visible reply). Any content
+    // carrying tool calls is a mid-flight tool step — never classified here
+    // (preserves the tool-call-only contract at unfinished-output.spec.ts:125).
+    // A genuinely empty message stays a durable replay boundary.
+    if (message.content.length === 0) return undefined
+    if (message.content.some(block => block.type === 'tool-call')) return undefined
+    return 'truncated'
+  }
   // A final text-only reply that consists solely of placeholders is a stall.
   if (texts.every(block => isPlaceholderOnly(block.text))) return 'truncated'
   if (texts.some(block => hasOpenTail(block.text))) return 'truncated'

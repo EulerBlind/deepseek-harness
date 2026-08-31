@@ -27,6 +27,23 @@ export function maxTokensResponse(text: string): StreamChunk[] {
   ]
 }
 
+/**
+ * A `stop` stream carrying only a reasoning block and NO visible text — the
+ * QIA-426 v4 shape. The model "thought" but produced no reply the user can
+ * read; the adapter still emits `stop` (not `EMPTY_RESPONSE`, because the
+ * reasoning delta opened a block). Used to exercise the reasoning-only
+ * unfinished-output guard.
+ */
+export function reasoningResponse(text: string): StreamChunk[] {
+  return [
+    { type: 'block-start', index: 0, blockType: 'reasoning' },
+    ...Array.from(text, (char): StreamChunk => ({ type: 'reasoning-delta', index: 0, text: char })),
+    { type: 'block-end', index: 0, block: { type: 'reasoning', text } },
+    { type: 'usage', usage: { inputTokens: 10, outputTokens: text.length } },
+    { type: 'finish', reason: { kind: 'stop' } },
+  ]
+}
+
 export function toolCallResponse(rawCallId: string, name: string, args: object, text?: string): StreamChunk[] {
   const callId = ToolCallId(rawCallId)
   const argumentsJson = JSON.stringify(args)

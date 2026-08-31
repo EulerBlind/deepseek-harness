@@ -132,4 +132,53 @@ describe('classifyUnfinishedOutput · action-preview narration (QIA-426)', () =>
       }),
     )).toBeUndefined()
   })
+
+  // ── QIA-426 v4: reasoning-only / empty stop shapes ────────────────────────
+
+  it('detects a reasoning-only stop as truncated (QIA-426 v4)', () => {
+    // Production shape: `stop` with only a reasoning block and no visible
+    // text. The model thought but never produced a reply the user can read.
+    expect(classifyUnfinishedOutput(
+      createAssistantMessage({
+        content: [{ type: 'reasoning', text: 'Let me think about the pod. The sandbox was recreated.' }],
+        source: { provider: 'mock', model: 'mock' },
+      }),
+    )).toBe('truncated')
+  })
+
+  it('keeps a reasoning + text stop deliverable (regression guard)', () => {
+    // A normal thinking-chain answer ends with visible text — never misjudged.
+    expect(classifyUnfinishedOutput(
+      createAssistantMessage({
+        content: [
+          { type: 'reasoning', text: 'Let me check the pod first.' },
+          { type: 'text', text: '结论：根因已复核，证据链充分。' },
+        ],
+        source: { provider: 'mock', model: 'mock' },
+      }),
+    )).toBeUndefined()
+  })
+
+  it('keeps a text-less reasoning + tool-call message out of the judgment', () => {
+    // Reasoning alongside a tool call is mid-flight — the classifier must not
+    // treat it as an unfinished final reply.
+    expect(classifyUnfinishedOutput(
+      createAssistantMessage({
+        content: [
+          { type: 'reasoning', text: 'I need to run a command.' },
+          { type: 'tool-call', id: 'call_1', name: 'bash', arguments: '{}' },
+        ],
+        source: { provider: 'mock', model: 'mock' },
+      }),
+    )).toBeUndefined()
+  })
+
+  it('keeps a genuinely empty stop as a durable boundary, not unfinished', () => {
+    // Adapters convert a terminal stop with no content to EMPTY_RESPONSE
+    // before it reaches the loop; a truly empty stop that does reach it is a
+    // legitimate durable-call boundary for replay consumers.
+    expect(classifyUnfinishedOutput(
+      createAssistantMessage({ content: [], source: { provider: 'mock', model: 'mock' } }),
+    )).toBeUndefined()
+  })
 })
