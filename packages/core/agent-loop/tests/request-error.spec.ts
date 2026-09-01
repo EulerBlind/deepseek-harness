@@ -317,6 +317,41 @@ describe('agent/request-error', () => {
     })
   })
 
+  it('retries the 09-01 219B production leak: completed report + dangling 移除 tail', async () => {
+    // V6: production comment 01a05cd3 (task 01a05ccc) was published verbatim —
+    // a completed report followed by a dangling cleanup fragment. Whole-text
+    // completion markers (已 push/干净) made v5 classify it as deliverable.
+    const leaked = '保留 we-ft-ci（含 race 修复 commit 的 worktree，方便后续引用——但 BA 要求不留未同步改动：bd792770 已 push，worktree 干净）。清理 we-ft-ci 也行（commit 已在远端 refs）。移除'
+    const realReply = '结论：we-ft-ci worktree 按 BA 要求已处理，bd792770 已 push。'
+    const adapter = new MockAdapter([textResponse(leaked), textResponse(realReply)])
+    const ctx = await harness(adapter)
+    const agent = ctx.agentLoop.create(SessionId('incomplete-output-action-preview-219b'), {
+      provider: 'mock',
+      model: 'mock',
+    })
+    const recoveries: string[] = []
+    ctx.on('agent/request-error', async ({ failure }) => {
+      recoveries.push(failure.code)
+      return { kind: 'retry' }
+    })
+
+    agent.followup(createUserMessage({ content: [{ type: 'text', text: 'go' }], source: { kind: 'user' } }))
+    await agent.whenIdle()
+
+    expect(recoveries).toEqual(['INCOMPLETE_OUTPUT'])
+    expect(adapter.requests).toHaveLength(2)
+    // The narration must not be persisted; only the real reply lands.
+    const messages = agent.session.events.filter(event => event.type === 'assistant/message')
+    expect(messages).toHaveLength(1)
+    expect(messages[0]).toMatchObject({
+      data: { message: { content: [{ type: 'text', text: realReply }] } },
+    })
+    expect(agent.session.events.find(event => event.type === 'turn/end')).toMatchObject({
+      type: 'turn/end',
+      data: { reason: { kind: 'completed' } },
+    })
+  })
+
   it('delivers an action-preview narration when recovery refuses (heuristic fails open)', async () => {
     const preview = '提交 回滚报告（--parent 01a0470c-7ea3-792d-b089-54d6ed004f34）'
     const adapter = new MockAdapter([textResponse(preview)])

@@ -260,4 +260,54 @@ describe('classifyUnfinishedOutput · action-preview narration (QIA-426)', () =>
     // deliverable for a text that contains 、 and ： but closes normally.
     expect(classifyUnfinishedOutput(finalText('先查看：内容不再有异常。'))).toBeUndefined()
   })
+
+  // ── QIA-426 v6: completion-marker scope + cleanup-verb tails (09-01 219B) ──
+
+  it('detects the 09-01 219B production leak: completed report + dangling 移除 tail', () => {
+    // Production 09-01 19:56 turn step 43 (comment 01a05cd3, task 01a05ccc,
+    // 219 bytes verbatim from the platform API): a COMPLETE report (已 push，
+    // worktree 干净）.+ 清理也行…）) followed by a self-referential cleanup
+    // fragment 移除 with no terminal punctuation and no tool call. The whole-
+    // text COMPLETION_MARKER test bailed on 已 push in the EARLIER report,
+    // so the dangling tail passed as deliverable — v6.
+    const text = '保留 we-ft-ci（含 race 修复 commit 的 worktree，方便后续引用——但 BA 要求不留未同步改动：bd792770 已 push，worktree 干净）。清理 we-ft-ci 也行（commit 已在远端 refs）。移除'
+    expect(Buffer.byteLength(text, 'utf8')).toBe(219)
+    expect(classifyUnfinishedOutput(finalText(text))).toBe('action-preview')
+  })
+
+  it('still catches the same tail when the fragment carries markdown emphasis', () => {
+    // BA quoted the sample with **移除**; a leading/trailing emphasis run is
+    // decoration, not a sentence boundary or a completion word.
+    const text = '保留 we-ft-ci（含 race 修复 commit 的 worktree，方便后续引用——但 BA 要求不留未同步改动：bd792770 已 push，worktree 干净）。清理 we-ft-ci 也行（commit 已在远端 refs）。**移除**'
+    expect(classifyUnfinishedOutput(finalText(text))).toBe('action-preview')
+  })
+
+  it('false-positive guard: a SELF-CONTAINED completed clause stays deliverable', () => {
+    // V6 negative: the completion marker must now be judged on the final
+    // clause ONLY — a report that ends with its own completion state (已 push /
+    // 干净/已发布 + sentence end) must not be re-classified. The scope change
+    // from whole-text to tail-clause must not regress these.
+    expect(classifyUnfinishedOutput(finalText('保留 we-ft-ci（bd792770 已 push，worktree 干净）。保留即可。'))).toBeUndefined()
+    expect(classifyUnfinishedOutput(finalText('清理 we-ft-ci 也行（commit 已在远端 refs）。'))).toBeUndefined()
+    expect(classifyUnfinishedOutput(finalText('bd792770 已 push，worktree 干净。'))).toBeUndefined()
+    // …and the v5 intent-lead shapes still fire when the tail is a genuine
+    // unfulfilled narration even if an earlier sentence reported completion.
+    expect(classifyUnfinishedOutput(finalText('检查已完成。先下载 v5 契约并检查环境工'))).toBe('action-preview')
+    expect(classifyUnfinishedOutput(finalText('已完成排查。查 mcp.ts 看它怎么转发'))).toBe('action-preview')
+  })
+
+  it('detects cleanup-verb tails (移除/清理/删除/删/归档/关闭/收尾) as unfulfilled intent', () => {
+    for (const verb of ['移除', '清理', '删除', '删', '归档', '关闭', '收尾']) {
+      expect(classifyUnfinishedOutput(finalText(`${verb}临时 worktree`)), `bare ${verb}`).toBe('action-preview')
+      expect(classifyUnfinishedOutput(finalText(`现状已确认。${verb}临时 worktree`)), `after-boundary ${verb}`).toBe('action-preview')
+    }
+  })
+
+  it('keeps completed reports with cleanup verbs deliverable', () => {
+    // The verb alone is not the trigger: a sentence end or a completion word
+    // closes the clause and makes it a deliverable report.
+    expect(classifyUnfinishedOutput(finalText('临时 worktree 已移除。'))).toBeUndefined()
+    expect(classifyUnfinishedOutput(finalText('已清理 we-ft-ci。'))).toBeUndefined()
+    expect(classifyUnfinishedOutput(finalText('删除已完成，旧目录不再引用。'))).toBeUndefined()
+  })
 })

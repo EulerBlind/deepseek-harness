@@ -143,13 +143,15 @@ const ABSENT_RESULT_MARKER = new RegExp(
  *    call ever runs it;
  * 2. a trailing intent clause (QIA-426 v5): the text ends WITHOUT any
  *    sentence-final punctuation and its final clause *leads* with an intent
- *    verb (先/再/接着/检查/查/下载/分析…), i.e. the model narrates "I am
- *    about to do X" and then stops instead of doing it. Production shapes
- *    (08-31 N7/N8 中断，均 ~180B 收尾): `N7 任务明确：…先下载 v5 契约并检查环境工`
- *    and `…查 mcp.ts — 看它怎么构造 header 转发请求`. The guard is NOT a
- *    generic "no terminal punctuation" test — a short statement that closes
- *    its clause with a completion particle (即可/就行/OK/done) or a backtick
- *    citation is a deliverable reply and must survive.
+ *    verb (先/再/接着/检查/查/下载/分析/移除/清理…), i.e. the model narrates
+ *    "I am about to do X" and then stops instead of doing it. Production
+ *    shapes (08-31 N7/N8 中断，均 ~180B 收尾): `N7 任务明确：…先下载 v5 契约并
+ *    检查环境工` and `…查 mcp.ts — 看它怎么构造 header 转发请求`; 09-01 219B
+ *    leak: `…已 push，worktree 干净）。…）。移除` — the final clause must be
+ *    judged on ITS OWN completion markers, not the report's (v6). The guard
+ *    is NOT a generic "no terminal punctuation" test — a short statement
+ *    that closes its clause with a completion particle (即可/就行/OK/done) or
+ *    a backtick citation is a deliverable reply and must survive.
  */
 function isActionPreview(text: string): boolean {
   const trimmed = text.trim()
@@ -158,8 +160,6 @@ function isActionPreview(text: string): boolean {
   // unfulfilled narration ends right after its connector (`…（--parent …）`)
   // or leaves its final clause without a sentence-final punctuation.
   if (/[。！？.!?]$/u.test(trimmed)) return false
-  // …and must NOT be a report of an action that already happened.
-  if (COMPLETION_MARKER.test(trimmed)) return false
   const stripped = trimmed.replace(CODE_SPAN, ' ')
   // Shape 1: announce a bare `--flag value` outside any code span — only
   // when the whole utterance stays short (a long text carrying a flag is a
@@ -174,12 +174,25 @@ function isActionPreview(text: string): boolean {
   // instead of promising a self-action). Only the clause itself is
   // length-bounded, so a long report whose last clause is an unfulfilled
   // promise is still caught.
-  const tailClause = stripped.split(SENTENCE_BOUNDARY).slice(-1).join('').trimStart()
+  const tailClause = stripped.split(SENTENCE_BOUNDARY).slice(-1).join('')
+    .replace(/^\s*[*_]+|[*_]+\s*$/g, '')
+    .trim()
   if (tailClause.length === 0 || tailClause.length > ACTION_PREVIEW_MAX_CHARS) return false
+  // …and must NOT be a report of an action that already happened. Scoped to
+  // the FINAL clause only (aligned with the other tail-exclusion words below):
+  // a completed report followed by a dangling intent fragment must still be
+  // judged on that fragment's own tail — production 09-01 219B leak:
+  // `…bd792770 已 push，worktree 干净）。…）。移除` — the whole-text test
+  // bailed on 已/干净 before the tail clause was ever examined.
+  if (COMPLETION_MARKER.test(tailClause)) return false
   if (/即可|就行|没问题|好了|行吧|OK|ok$|的输出$|的结果$/u.test(tailClause)) return false
   if (/^(?:没有|无|未见|未发现|未找到|查不到|找不到|不存在)/u.test(tailClause)) return false
   if (ABSENT_RESULT_MARKER.test(tailClause)) return false
-  const intentLead = /^(?:先|接着|接下来|下一步|随后|再|继续|去|查(?!询)|下载|读取|获取|打开|跑|试|验证)/u
+  // Unfulfilled action verbs, incl. self-referential cleanup verbs
+  // (移除/清理/删除/删/归档/关闭/收尾) that announce a mutation of the
+  // workspace/refs and then stop without performing it (production 09-01:
+  // the final clause was just `移除`, no terminal punctuation).
+  const intentLead = /^(?:先|接着|接下来|下一步|随后|再|继续|去|查(?!询)|下载|读取|获取|打开|跑|试|验证|移除|清理|删除|删|归档|关闭|收尾)/u
   return intentLead.test(tailClause)
 }
 
@@ -223,7 +236,10 @@ export type UnfinishedOutputKind = 'truncated' | 'action-preview'
  *    - citing a bare `--flag value` (QIA-426), or
  *    - a trailing intent clause ending without sentence-final punctuation
  *      (QIA-426 v5, production N7/N8 中断 2026-08-31: `先下载 v5 契约并检查环境工`
- *      `/ 查 mcp.ts — 看它怎么构造 header 转发请求`).
+ *      `/ 查 mcp.ts — 看它怎么构造 header 转发请求`; v6 09-01 219B leak:
+ *      `…已 push，worktree 干净）。…）。移除` — completion markers are judged
+ *      on the final clause only, so a completed report followed by a dangling
+ *      cleanup intent is still caught).
  *    → `action-preview`, which fails OPEN on exhausted retries.
  *
  * A genuinely empty message (`content: []`) is NOT classified here: the
