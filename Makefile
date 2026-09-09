@@ -6,7 +6,8 @@
 #
 #   make            # same as: make all   (update -> build -> install)
 #   make update     # fetch origin/master and rebase the current branch
-#   make build      # pnpm install + build:lib (+ rebuild runtime plugin dist)
+#   make build      # full build: native system + build:lib + web frontend
+#                   # (+ rebuild runtime plugin dist)
 #   make install    # copy built artifacts into the local dsh bundle
 #   make backup     # tarball the current installed bundle under /tmp
 #   make test       # targeted vitest suites for the changed packages
@@ -55,9 +56,14 @@ update:
 	@echo "==> [update] current head: $$(cd $(REPO) && git log --oneline -1)"
 
 build:
-	@echo "==> [build] pnpm install + build:lib"
+	@echo "==> [build] pnpm install"
 	cd $(REPO) && (pnpm install --frozen-lockfile || pnpm install)
+	@echo "==> [build] native system addons"
+	cd $(REPO) && pnpm run build:native-system
+	@echo "==> [build] build:lib (host + client)"
 	cd $(REPO) && pnpm run build:lib
+	@echo "==> [build] web frontend"
+	cd $(REPO) && pnpm run build:web
 	@echo "==> [build] rebuilding runtime plugin dist"
 	cd $(RUNTIME_REPO) && (pnpm install --frozen-lockfile || pnpm install) && pnpm run build
 	@echo "==> [build] done"
