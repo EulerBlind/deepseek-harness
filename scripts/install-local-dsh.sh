@@ -162,6 +162,26 @@ else
   echo "  warning: apps/web/dist missing (did you run build:web?)"
 fi
 
+# --- 4b: sync daemon-managed profile hook packages from the bundle ---
+# The multica profile pins rc.6 copies of dsh-hooks-claude-code / dsh-hook-protocol
+# that iterate the removed `session.events` getter and break against the newer
+# bundle session API ("agent.session.events is not iterable"). Overwrite them
+# with the bundle's built versions on every install so the profile always
+# matches the bundle it loads against.
+DSH_PROFILE="${DSH_PROFILE:-$HOME/.dsh/profiles/multica}"
+if [ -d "$DSH_PROFILE/node_modules/@deepseek-ai" ]; then
+  for h in dsh-hooks-claude-code dsh-hook-protocol; do
+    if [ -d "$PKG_DIR/$h/lib" ] && [ -d "$DSH_PROFILE/node_modules/@deepseek-ai/$h" ]; then
+      rm -rf "$DSH_PROFILE/node_modules/@deepseek-ai/$h/lib"
+      cp -a "$PKG_DIR/$h/lib" "$DSH_PROFILE/node_modules/@deepseek-ai/$h/lib"
+      cp "$PKG_DIR/$h/package.json" "$DSH_PROFILE/node_modules/@deepseek-ai/$h/package.json"
+      echo "  synced profile hook $h -> bundle version"
+    fi
+  done
+else
+  echo "  note: no dsh profile at $DSH_PROFILE (skipping hook sync)"
+fi
+
 # --- 5: runtime plugin dist (profile links directly to the runtime repo) ---
 if [ -d "$RUNTIME_REPO" ]; then
   (cd "$RUNTIME_REPO" && pnpm run build >/dev/null) && echo "  rebuilt runtime plugin dist ($RUNTIME_REPO)"
