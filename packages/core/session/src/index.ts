@@ -646,6 +646,19 @@ export class Session {
   }
 
   /**
+   * Backward-compatible full-log snapshot accessor. The pre-0.1.5 Session
+   * exposed an iterable `events` getter that older integrations (for example
+   * the multica profile's pinned rc.6 dsh-hooks-claude-code / dsh-hook-protocol)
+   * still spread or iterate; the 0.1.5 snapshot refactor moved this read behind
+   * {@link snapshotEvents}, so those consumers crashed with "agent.session.events
+   * is not iterable". Return the same cached immutable snapshot so legacy code
+   * keeps working against newer bundles.
+   */
+  get events(): readonly SessionEvent[] {
+    return this.snapshotEvents()
+  }
+
+  /**
    * Return this Session's events after its fork-inherited prefix.
    * @deprecated Existing logic may remain unmigrated for now, but new calls are prohibited.
    * See the [Agent Note](../../../../.agents/notes/implemented/architecture/2026-09-09-deprecate-synchronous-session-event-reads.md).
