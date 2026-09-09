@@ -46,6 +46,23 @@ describe('Session log positions', () => {
     expectTypeOf(session.seq).toEqualTypeOf<SessionLogOffsetType>()
   })
 
+  it('exposes a backward-compatible iterable events getter (snapshotEvents alias)', () => {
+    const session = Session.create(SessionId('events-getter'))
+    session.append('turn/start', { turn: 1 })
+    session.append('turn/end', { turn: 1, reason: { kind: 'completed' } })
+
+    const events = [...session.events]
+    expect(events.map(event => event.type)).toEqual(['turn/start', 'turn/end'])
+    // Same cached frozen snapshot as snapshotEvents(); reused until the next append.
+    expect(session.events).toBe(session.snapshotEvents())
+    expect(Object.isFrozen(session.events)).toBe(true)
+    const before = session.events
+    expect(before).toHaveLength(2)
+    session.append('turn/start', { turn: 2 })
+    expect(before).toHaveLength(2)
+    expect([...session.events]).toHaveLength(3)
+  })
+
   it('rejects a negative-zero seq at the restored event boundary', () => {
     const id = SessionId('negative-zero-event')
     expect(() => Session.fromRestore(
