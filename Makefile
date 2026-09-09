@@ -103,9 +103,14 @@ update:
 	@echo "==> [update] current head: $$(cd $(REPO) && git log --oneline -1)"
 
 lib:
-	@echo "==> [build] pnpm install + build:lib"
+	@echo "==> [build] pnpm install"
 	cd $(REPO) && (pnpm install --frozen-lockfile || pnpm install)
+	@echo "==> [build] native system addons"
+	cd $(REPO) && pnpm run build:native-system
+	@echo "==> [build] build:lib (host + client)"
 	cd $(REPO) && pnpm run build:lib
+	@echo "==> [build] web frontend"
+	cd $(REPO) && pnpm run build:web
 	@echo "==> [build] rebuilding runtime plugin dist"
 	cd $(RUNTIME_REPO) && (pnpm install --frozen-lockfile || pnpm install) && pnpm run build
 	@echo "==> [build] done"
