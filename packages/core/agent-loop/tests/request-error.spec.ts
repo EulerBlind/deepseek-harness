@@ -294,7 +294,7 @@ describe('agent/request-error', () => {
       textResponse('调研+回滚报告已发布（--parent 01a0470c-7ea3-792d-b089-54d6ed004f34），见附件 reply.md。'),
     ])
     const ctx = await harness(adapter)
-    const agent = ctx.agentLoop.create(SessionId('incomplete-output-action-preview-retry'), {
+    const agent = await ctx.agentLoop.create(SessionId('incomplete-output-action-preview-retry'), {
       provider: 'mock',
       model: 'mock',
     })
@@ -325,7 +325,7 @@ describe('agent/request-error', () => {
     const realReply = '结论：we-ft-ci worktree 按 BA 要求已处理，bd792770 已 push。'
     const adapter = new MockAdapter([textResponse(leaked), textResponse(realReply)])
     const ctx = await harness(adapter)
-    const agent = ctx.agentLoop.create(SessionId('incomplete-output-action-preview-219b'), {
+    const agent = await ctx.agentLoop.create(SessionId('incomplete-output-action-preview-219b'), {
       provider: 'mock',
       model: 'mock',
     })
@@ -356,7 +356,7 @@ describe('agent/request-error', () => {
     const preview = '提交 回滚报告（--parent 01a0470c-7ea3-792d-b089-54d6ed004f34）'
     const adapter = new MockAdapter([textResponse(preview)])
     const ctx = await harness(adapter)
-    const agent = ctx.agentLoop.create(SessionId('incomplete-output-action-preview-refused'), {
+    const agent = await ctx.agentLoop.create(SessionId('incomplete-output-action-preview-refused'), {
       provider: 'mock',
       model: 'mock',
     })
@@ -384,7 +384,7 @@ describe('agent/request-error', () => {
     // structural fact, so a refused retry must not publish half a sentence.
     const adapter = new MockAdapter([textResponse('先看 worktree 状态，')])
     const ctx = await harness(adapter)
-    const agent = ctx.agentLoop.create(SessionId('incomplete-output-truncated-refused'), {
+    const agent = await ctx.agentLoop.create(SessionId('incomplete-output-truncated-refused'), {
       provider: 'mock',
       model: 'mock',
     })
@@ -404,7 +404,7 @@ describe('agent/request-error', () => {
     // completion marker — a legitimate short reply, never a preview.
     const adapter = new MockAdapter([textResponse('运行 `pnpm test` 即可')])
     const ctx = await harness(adapter)
-    const agent = ctx.agentLoop.create(SessionId('incomplete-output-code-citation'), {
+    const agent = await ctx.agentLoop.create(SessionId('incomplete-output-code-citation'), {
       provider: 'mock',
       model: 'mock',
     })
@@ -429,7 +429,7 @@ describe('agent/request-error', () => {
   it('keeps a completed-action report with a cited option token as a valid final reply', async () => {
     const adapter = new MockAdapter([textResponse('已发布调研+回滚报告（--parent 01a05c0b-7fc3-792d-b089-54d6ed004f34）。')])
     const ctx = await harness(adapter)
-    const agent = ctx.agentLoop.create(SessionId('incomplete-output-action-preview-reported'), {
+    const agent = await ctx.agentLoop.create(SessionId('incomplete-output-action-preview-reported'), {
       provider: 'mock',
       model: 'mock',
     })
@@ -447,7 +447,7 @@ describe('agent/request-error', () => {
   it('keeps a short instructional one-liner with a CLI flag completed', async () => {
     const adapter = new MockAdapter([textResponse('用 --force 覆盖即可。')])
     const ctx = await harness(adapter)
-    const agent = ctx.agentLoop.create(SessionId('incomplete-output-action-preview-instruction'), {
+    const agent = await ctx.agentLoop.create(SessionId('incomplete-output-action-preview-instruction'), {
       provider: 'mock',
       model: 'mock',
     })
@@ -470,7 +470,7 @@ describe('agent/request-error', () => {
       textResponse('结论：根因已复核，证据链充分。'),
     ])
     const ctx = await harness(adapter)
-    const agent = ctx.agentLoop.create(SessionId('incomplete-output-reasoning-only-retry'), {
+    const agent = await ctx.agentLoop.create(SessionId('incomplete-output-reasoning-only-retry'), {
       provider: 'mock',
       model: 'mock',
     })
@@ -500,7 +500,7 @@ describe('agent/request-error', () => {
   it('ends a reasoning-only stop in error when recovery refuses, persisting no stub', async () => {
     const adapter = new MockAdapter([reasoningResponse('Let me think about this.')])
     const ctx = await harness(adapter)
-    const agent = ctx.agentLoop.create(SessionId('incomplete-output-reasoning-only-refused'), {
+    const agent = await ctx.agentLoop.create(SessionId('incomplete-output-reasoning-only-refused'), {
       provider: 'mock',
       model: 'mock',
     })
@@ -536,7 +536,7 @@ describe('agent/request-error', () => {
       { type: 'finish', reason: { kind: 'stop' } },
     ]])
     const ctx = await harness(adapter)
-    const agent = ctx.agentLoop.create(SessionId('incomplete-output-reasoning-text-ok'), {
+    const agent = await ctx.agentLoop.create(SessionId('incomplete-output-reasoning-text-ok'), {
       provider: 'mock',
       model: 'mock',
     })
@@ -570,7 +570,7 @@ describe('agent/request-error', () => {
       textResponse('N7 已完成：分派范围内所有核查项已定案并回报 BA。'),
     ])
     const ctx = await harness(adapter)
-    const agent = ctx.agentLoop.create(SessionId('incomplete-output-intent-clause-retry'), {
+    const agent = await ctx.agentLoop.create(SessionId('incomplete-output-intent-clause-retry'), {
       provider: 'mock',
       model: 'mock',
     })
@@ -607,7 +607,7 @@ describe('agent/request-error', () => {
       textResponse('结论：引擎侧入口已定位在 sandbox/bridges/mcp.ts。'),
     ])
     const ctx = await harness(adapter)
-    const agent = ctx.agentLoop.create(SessionId('incomplete-output-n8-raw-retry'), {
+    const agent = await ctx.agentLoop.create(SessionId('incomplete-output-n8-raw-retry'), {
       provider: 'mock',
       model: 'mock',
     })
@@ -638,7 +638,7 @@ describe('agent/request-error', () => {
     // recovery may fire for "查了，没有该记录" reports (v5 rework).
     const adapter = new MockAdapter([textResponse('查不到，日志里没有该记录')])
     const ctx = await harness(adapter)
-    const agent = ctx.agentLoop.create(SessionId('incomplete-output-absent-report'), {
+    const agent = await ctx.agentLoop.create(SessionId('incomplete-output-absent-report'), {
       provider: 'mock',
       model: 'mock',
     })

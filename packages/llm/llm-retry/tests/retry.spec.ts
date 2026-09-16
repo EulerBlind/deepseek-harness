@@ -1077,7 +1077,7 @@ describe('provider-routed retry policy', () => {
     ;({ ctx: context } = await harness(adapter, {
       mock: normalConfig({ maxRetries: 2, backoff: { initialDelayMs: 1, maxDelayMs: 1 } }),
     }))
-    const agent = context.agentLoop.create(SessionId('retry-action-preview-failopen'), {
+    const agent = await context.agentLoop.create(SessionId('retry-action-preview-failopen'), {
       provider: 'mock',
       model: 'mock',
     })
@@ -1116,7 +1116,7 @@ describe('provider-routed retry policy', () => {
     ;({ ctx: context } = await harness(adapter, {
       mock: normalConfig({ maxRetries: 1, backoff: { initialDelayMs: 1, maxDelayMs: 1 } }),
     }))
-    const agent = context.agentLoop.create(SessionId('retry-truncated-failclosed'), {
+    const agent = await context.agentLoop.create(SessionId('retry-truncated-failclosed'), {
       provider: 'mock',
       model: 'mock',
     })
@@ -1151,7 +1151,7 @@ describe('provider-routed retry policy', () => {
     ;({ ctx: context } = await harness(adapter, {
       mock: normalConfig({ maxRetries: 1, backoff: { initialDelayMs: 1, maxDelayMs: 1 } }),
     }))
-    const agent = context.agentLoop.create(SessionId('retry-reasoning-only-failclosed'), {
+    const agent = await context.agentLoop.create(SessionId('retry-reasoning-only-failclosed'), {
       provider: 'mock',
       model: 'mock',
     })
