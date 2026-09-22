@@ -33,6 +33,22 @@ interface MockCallResult {
 }
 
 function createMockClient(tools: MockTool[], callResult: MockCallResult = { content: [{ type: 'text', text: 'ok' }] }) {
+  /**
+   * Wire-call recorder. The 0.1.7 SDK routes `tools/list` and `tools/call`
+   * through `client.request` with `(request, schema?, options?)`, so this spy
+   * records the raw JSON-RPC request and forwards each method to the matching
+   * per-method double that the tests configure and assert on.
+   */
+  const request = vi.fn(async (
+    req: { method: string; params?: Record<string, unknown> },
+    _schemaOrOptions?: unknown,
+    options?: unknown,
+  ): Promise<unknown> => {
+    if (req.method === 'tools/list') return await listTools(req.params)
+    if (req.method === 'tools/call') return await callTool(req.params, options)
+    throw new Error(`unexpected method ${req.method}`)
+  })
+
   const listTools = vi.fn(async (
     _params?: Record<string, unknown>,
   ): Promise<{ tools: MockTool[]; nextCursor: string | undefined }> => ({ tools, nextCursor: undefined }))
@@ -40,7 +56,9 @@ function createMockClient(tools: MockTool[], callResult: MockCallResult = { cont
     _params?: Record<string, unknown>,
     _options?: unknown,
   ): Promise<Record<string, unknown>> => ({ ...callResult }))
+
   return {
+    request,
     listTools,
     callTool,
     getServerCapabilities: (): object => ({ tools: {} }),
@@ -432,7 +450,9 @@ describe('syncTools', () => {
         signal: testToolSignal,
         callId: ToolCallId('missing'), name: 'mcp__srv__supported', arguments: {},
       })
-      expect(missing.error?.message).toContain('structured content')
+      // 0.1.7 validates the missing structured payload against the advertised
+      // schema before rendering, so the message names the absent property.
+      expect(missing.error?.message).toContain('structuredContent')
 
       const fallback = await ctx.tools.execute({
         signal: testToolSignal,

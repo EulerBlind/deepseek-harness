@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { createAssistantMessage } from '@deepseek-ai/dsh-llm'
+import { ToolCallId, createAssistantMessage } from '@deepseek-ai/dsh-llm'
 import { classifyUnfinishedOutput } from '../src/unfinished-output.ts'
 
 function finalText(text: string) {
@@ -127,7 +127,7 @@ describe('classifyUnfinishedOutput · action-preview narration (QIA-426)', () =>
     // must not misclassify a text-less message (empty texts array).
     expect(classifyUnfinishedOutput(
       createAssistantMessage({
-        content: [{ type: 'tool-call', id: 'call_1', name: 'bash', arguments: '{}' }],
+        content: [{ type: 'tool-call', id: ToolCallId('call_1'), name: 'bash', arguments: '{}' }],
         source: { provider: 'mock', model: 'mock' },
       }),
     )).toBeUndefined()
@@ -166,7 +166,7 @@ describe('classifyUnfinishedOutput · action-preview narration (QIA-426)', () =>
       createAssistantMessage({
         content: [
           { type: 'reasoning', text: 'I need to run a command.' },
-          { type: 'tool-call', id: 'call_1', name: 'bash', arguments: '{}' },
+          { type: 'tool-call', id: ToolCallId('call_1'), name: 'bash', arguments: '{}' },
         ],
         source: { provider: 'mock', model: 'mock' },
       }),

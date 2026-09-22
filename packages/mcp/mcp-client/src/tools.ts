@@ -14,7 +14,8 @@
 
 import { createHash } from 'node:crypto'
 import { isDeepStrictEqual } from 'node:util'
-import { specTypeSchemas, type Client, type ImageContent } from '@modelcontextprotocol/client'
+import { specTypeSchemas, type Client, type ImageContent, type ListToolsResult } from '@modelcontextprotocol/client'
+import { z } from 'zod'
 import type { Context } from '@deepseek-ai/cordis'
 import { isImageAdmissionError } from '@deepseek-ai/dsh-attachment'
 import type { AttachmentStore, ImageAttachmentRef, ImageMediaType, SaveImageAttachment } from '@deepseek-ai/dsh-attachment'
@@ -63,6 +64,40 @@ const IMAGE_MEDIA_TYPES: readonly ImageMediaType[] = [
 
 /** Canonical RFC 4648 base64, excluding whitespace and URL-safe aliases. */
 const CANONICAL_BASE64 = /^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/
+
+/** Raw result record: the bridge owns JSON-value validation after transport. */
+const RawCallToolResultSchema = z.record(z.string(), z.unknown())
+
+/**
+ * List one page of `tools/list` without the SDK's client-level aggregation.
+ *
+ * The bridge owns pagination because it must reject a repeated continuation
+ * cursor, and it reads one page per call so the SDK's response cache is never
+ * consulted for the model-facing tool generation.
+ */
+function listToolsUncached(client: Client, cursor?: string): Promise<ListToolsResult> {
+  return client.request(
+    { method: 'tools/list', ...cursor === undefined ? {} : { params: { cursor } } },
+  )
+}
+
+/** Call without the SDK pre-validating an output schema the bridge may not support. */
+function callToolUncached(
+  client: Client,
+  rawName: string,
+  args: Record<string, unknown>,
+  exec: ToolExecution,
+  opts: ToolBridgeOptions,
+) {
+  return client.request(
+    { method: 'tools/call', params: { name: rawName, arguments: args } },
+    RawCallToolResultSchema,
+    {
+      signal: exec.signal,
+      timeout: opts.toolCallTimeoutMs,
+    },
+  )
+}
 
 /**
  * Derive the model-facing public name for one MCP tool.
@@ -121,7 +156,12 @@ export async function syncTools(
   const seenCursors = new Set<string>()
   let cursor: string | undefined
   do {
-    const response = await listToolsUncached(client, cursor)
+    // A server without the tools capability answers `tools/list` with
+    // `-32601`, which would fail the whole connection; treat it as an empty
+    // list exactly like `Client.listTools()` does.
+    const response = client.getServerCapabilities()?.tools === undefined
+      ? { tools: [] }
+      : await listToolsUncached(client, cursor)
     for (const tool of response.tools) {
       const publicName = publicToolName(opts.serverName, tool.name)
       if (definitions.has(publicName)) {
@@ -130,7 +170,6 @@ export async function syncTools(
         )
       }
       definitions.set(publicName, createDefinition(
-        client,
         ctx,
         publicName,
         tool.name,
@@ -138,7 +177,7 @@ export async function syncTools(
         normalizeInputSchema(tool.inputSchema),
         supportedOutputSchema(tool.outputSchema),
         tool.execution?.taskSupport === 'required',
-        opts,
+        (args, exec) => callToolUncached(client, tool.name, args, exec, opts),
       ))
     }
     cursor = response.nextCursor
@@ -272,6 +311,29 @@ export function normalizeInputSchema(inputSchema: Record<string, unknown>): Reco
   return normalizeSchemaNode(inputSchema) as Record<string, unknown>
 }
 
+/** One upstream MCP tool and the callback that obtains its raw protocol result. */
+export interface McpToolDefinitionOptions {
+  /** ToolRuntime name presented to the model. */
+  name: string
+  /** Upstream name used in result diagnostics. */
+  rawName: string
+  /** Upstream model-facing description. */
+  description: string
+  /** Upstream JSON input schema, already normalized by {@link normalizeInputSchema}. */
+  inputSchema: Record<string, unknown>
+  /** Advertised structured output schema, when present. */
+  outputSchema?: unknown
+  /** Whether the upstream tool requires the unsupported task execution extension. */
+  taskRequired?: boolean
+  /**
+   * Obtain one raw MCP result from the provider.
+   * @param args - model arguments admitted by the ToolRuntime.
+   * @param execution - exact ToolRuntime invocation, including its Agent and cancellation.
+   * @returns the external result object, validated before content projection.
+   */
+  call(args: Record<string, unknown>, execution: ToolExecution): Promise<unknown>
+}
+
 /**
  * Adapt an upstream MCP tool to canonical values and durable image content.
  * Registration, provider lifetime, deadlines, and transport belong to the caller.
@@ -283,24 +345,17 @@ export function createMcpToolDefinition(
   ctx: Context,
   options: McpToolDefinitionOptions,
 ): ToolDefinition {
-  const { name, rawName, description, inputSchema } = options
-  const projections = new WeakMap<ToolExecution, PreparedProjection>()
-  return {
+  const { name, rawName, description } = options
+  return createDefinition(
+    ctx,
     name,
+    rawName,
     description,
-    parameters: inputSchema,
-    output: createOutput(rawName, supportedOutputSchema(options.outputSchema)),
-    execute: createExecutor(ctx, options, projections),
-    projectContent(exec: Readonly<ToolExecution>, result: Readonly<ToolExecutionResult>) {
-      const projection = projections.get(exec)
-      if (projection === undefined) return undefined
-      projections.delete(exec)
-      if (result.isError) return undefined
-      if (!isDeepStrictEqual(result.value, projection.value)) return undefined
-      if (!isDeepStrictEqual(result.content, projection.fallback)) return undefined
-      return projection.content
-    },
-  }
+    normalizeInputSchema(options.inputSchema),
+    supportedOutputSchema(options.outputSchema),
+    options.taskRequired === true,
+    (args, exec) => options.call(args, exec),
+  )
 }
 
 /** Build the canonical result schema and existing Native text projection. */
@@ -322,16 +377,66 @@ function createOutput(rawName: string, structuredSchema: JsonSchemaNode | undefi
   }
 }
 
+/** Obtain one raw MCP result for a public tool name and its admitted arguments. */
+type RawToolCall = (args: Record<string, unknown>, exec: ToolExecution) => Promise<unknown>
+
+/**
+ * Build one ToolRuntime definition from a raw-result callback.
+ *
+ * The callback owns transport and arguments shaping; this builder owns the
+ * registry-facing surface (name, description, parameters, output schema) and
+ * the execution-local rich projections.
+ *
+ * @param ctx - plugin context carrying optional attachment and model services.
+ * @param publicName - registry-qualified public tool name.
+ * @param rawName - MCP wire tool name used in diagnostics.
+ * @param description - model-facing tool description.
+ * @param parameters - normalized MCP input schema.
+ * @param structuredSchema - supported structured-output schema, when advertised.
+ * @param taskRequired - whether this MCP tool requires unsupported task execution.
+ * @param call - raw-result callback for one execution.
+ * @returns the unregistered ToolRuntime definition.
+ */
+function createDefinition(
+  ctx: Context,
+  publicName: string,
+  rawName: string,
+  description: string,
+  parameters: Record<string, unknown>,
+  structuredSchema: JsonSchemaNode | undefined,
+  taskRequired: boolean,
+  call: RawToolCall,
+): ToolDefinition {
+  const projections = new WeakMap<ToolExecution, PreparedProjection>()
+  return {
+    name: publicName,
+    description,
+    parameters,
+    output: createOutput(rawName, structuredSchema),
+    execute: createExecutor(ctx, rawName, taskRequired, call, projections),
+    projectContent(exec: Readonly<ToolExecution>, result: Readonly<ToolExecutionResult>) {
+      const projection = projections.get(exec)
+      if (projection === undefined) return undefined
+      projections.delete(exec)
+      if (result.isError) return undefined
+      if (!isDeepStrictEqual(result.value, projection.value)) return undefined
+      if (!isDeepStrictEqual(result.content, projection.fallback)) return undefined
+      return projection.content
+    },
+  }
+}
+
 /**
  * Invoke the caller-owned raw-result callback and prepare canonical content.
  * MCP isError results reject before image storage so ToolRuntime records failure.
  */
 function createExecutor(
   ctx: Context,
-  options: McpToolDefinitionOptions,
+  rawName: string,
+  taskRequired: boolean,
+  call: RawToolCall,
   projections: WeakMap<ToolExecution, PreparedProjection>,
 ): ToolDefinition['execute'] {
-  const { rawName, taskRequired } = options
   return async (args: unknown, exec: ToolExecution) => {
     if (taskRequired) {
       throw new Error(`Tool "${rawName}" requires task-based execution, which this bridge does not support`)
@@ -341,7 +446,7 @@ function createExecutor(
     // string/number/null). Fallback to {} lets the MCP server produce a
     // specific "missing required param" error the model can learn from.
     const argsObj = (typeof args === 'object' && args !== null ? args : {}) as Record<string, unknown>
-    const parsed = specTypeSchemas.CallToolResult['~standard'].validate(await options.call(argsObj, exec))
+    const parsed = specTypeSchemas.CallToolResult['~standard'].validate(await call(argsObj, exec))
     if (parsed.issues !== undefined) {
       throw new Error(`Tool "${rawName}" returned an invalid MCP result: ${parsed.issues.map(issue => issue.message).join('; ')}`)
     }

@@ -28,6 +28,19 @@ const { mockConnect, mockClose, mockListTools, mockCallTool, mockSetNotification
     close = mockClose
     listTools = mockListTools
     callTool = mockCallTool
+    /**
+     * The 0.1.7 SDK routes `tools/list` and `tools/call` through
+     * `client.request`; the bridge reads single pages so it can own pagination.
+     */
+    request = vi.fn(async (
+      req: { method: string; params?: Record<string, unknown> },
+      _schemaOrOptions?: unknown,
+      options?: unknown,
+    ): Promise<unknown> => {
+      if (req.method === 'tools/list') return await mockListTools(req.params)
+      if (req.method === 'tools/call') return await mockCallTool(req.params, options)
+      throw new Error(`unexpected method ${req.method}`)
+    })
     constructor(_info: unknown, options: { listChanged: { tools: { onChanged: () => void } } }) {
       mockSetNotificationHandler('notifications/tools/list_changed', options.listChanged.tools.onChanged)
     }

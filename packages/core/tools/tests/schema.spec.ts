@@ -20,8 +20,10 @@ describe('the unified author schema DSL', () => {
     expect(valueSchemaSpecToJsonSchema({ type: 'null' })).toEqual({ type: 'null' })
     expect(valueSchemaSpecToJsonSchema({ type: 'array', items: { type: 'json' } }))
       .toEqual({ type: 'array', items: {} })
+    // QIA-425: the compiler always materializes `required`, empty included, so
+    // gateways that read an absent keyword as null never reject the schema.
     expect(valueSchemaSpecToJsonSchema({ type: 'object', additionalProperties: false, properties: {} }))
-      .toEqual({ type: 'object', additionalProperties: false, properties: {} })
+      .toEqual({ type: 'object', additionalProperties: false, properties: {}, required: [] })
     expect(valueSchemaSpecToJsonSchema({
       type: 'json',
       description: 'anything',
