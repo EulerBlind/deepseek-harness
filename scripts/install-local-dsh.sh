@@ -169,6 +169,11 @@ import json, os, re, shutil
 REPO = os.environ['REPO']
 DSH_BUNDLE = os.environ['DSH_BUNDLE']
 BUNDLE_NM = os.path.join(DSH_BUNDLE, 'node_modules')
+# The workspace siblings installed by the previous step; a `@deepseek-ai/`
+# name in this set is satisfied inside the bundle and must not be re-resolved
+# as a third-party package.
+installed_shorts = set(os.listdir(os.path.join(BUNDLE_NM, '@deepseek-ai'))
+                       if os.path.isdir(os.path.join(BUNDLE_NM, '@deepseek-ai')) else [])
 
 def package_roots():
     import glob
@@ -189,7 +194,14 @@ def third_party_names():
             continue
         for field in ('dependencies', 'peerDependencies', 'optionalDependencies'):
             for name, spec in (data.get(field) or {}).items():
-                if name.startswith('@deepseek-ai/'):
+                # A `@deepseek-ai/` dependency is an in-repo workspace sibling
+                # only when that name is built and installed above. External
+                # scoped packages that merely share the namespace — notably
+                # `@deepseek-ai/libreoffice-kit`, which comes from npm and is
+                # required by dsh-office-to-pdf, dsh-skill-office and
+                # dsh-desktop-host — must join the closure too, or those libs
+                # fail to import at boot with ERR_MODULE_NOT_FOUND.
+                if name.startswith('@deepseek-ai/') and name.split('/', 1)[1] in installed_shorts:
                     continue
                 # Optional peers are frequently absent by design.
                 if field == 'optionalDependencies':
