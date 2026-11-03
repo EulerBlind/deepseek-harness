@@ -4,6 +4,7 @@ import type { AttachmentStore, ImageAttachmentRef } from '@deepseek-ai/dsh-attac
 import type { AnonymousUserId } from '@deepseek-ai/dsh-anonymous-user-id'
 import type { DeepSeekLlmApiExtensionRequest, PreparedDeepSeekLlmApiExtensions } from '@deepseek-ai/dsh-deepseek-llm-api-extensions'
 import type { DeepSeekFileStore, DeepSeekFilePolicy } from './file-store.ts'
+import type { StreamDegradation } from './translate.ts'
 
 /** One optional model entry advertised by the direct-fetch adapter. */
 export interface DeepSeekCatalogModel {
@@ -93,6 +94,8 @@ export interface DeepSeekRequestAuth {
 export interface DeepSeekAdapterOptions<Connection extends DeepSeekConnectionOptions = DeepSeekConnectionOptions> {
   /** Report unusable native Messages replay metadata without exposing content or signatures. */
   onReplayDegrade?: (detail: { provider: string; model: string; reason: string }) => void
+  /** Report a stream that settled after losing a frame instead of failing the turn. */
+  onStreamDegrade?: (detail: { provider: string; model: string; degradation: StreamDegradation }) => void
   /** Report extension fields omitted from one request because the merged request failed to serialize. */
   onExtensionsOmitted?: (detail: { provider: string; model: string; fields: readonly string[]; error: unknown }) => void
   /** Report an extension acceptance failure after HTTP 2xx; the request continues. */

@@ -33,6 +33,9 @@ export function registerDeepSeekProvider<C extends DeepSeekConnectionOptions>(
       degradedReplays.add(key)
       ctx.logger.warn(`llm-deepseek: unusable Messages replay state on assistant history for route "${provider}/${model}"; sending provider-neutral content (${reason})`)
     },
+    onStreamDegrade: ({ provider, model, degradation }) => {
+      ctx.logger.warn(`llm-deepseek: route "${provider}/${model}" settled a degraded Messages stream instead of failing the turn: ${degradation.kind} (${degradation.detail})`)
+    },
     onExtensionsOmitted: ({ provider, model, fields, error }) => {
       const route = `${provider}/${model}`
       if (omittedRoutes.has(route)) return

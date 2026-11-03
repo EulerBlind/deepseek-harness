@@ -24,11 +24,12 @@ import LocalCredentials from '@deepseek-ai/dsh-credentials-local'
 import { profileComposition } from '../../../settings/settings/tests/profile-composition.ts'
 import SessionStore, { SessionId } from '@deepseek-ai/dsh-session'
 import { DeepSeekAdapter } from '../src/adapter.ts'
+import type { StreamDegradation } from '../src/translate.ts'
 import { object } from '../src/replay.ts'
 import { DeepSeekFileStore } from '../src/file-store.ts'
 import * as Messages from '@deepseek-ai/dsh-llm-deepseek-api-key'
 import * as AccountProvider from '@deepseek-ai/dsh-llm-deepseek-account'
-import { adapter, assemble, chunks, MODEL, options, prepareExtensions, server, sse, textEvents, user, sourceModuleLoader } from './helpers.ts'
+import { adapter, assemble, chunks, end, MODEL, options, prepareExtensions, server, sse, start, textEvents, user, sourceModuleLoader } from './helpers.ts'
 
 const cleanup: (() => Promise<unknown>)[] = []
 afterEach(async () => {
@@ -107,6 +108,28 @@ describe('direct Messages HTTP', () => {
       { role: 'assistant', content: [{ type: 'text', text: 'Remember 731.' }] },
       { role: 'user', content: [{ type: 'text', text: 'hello' }] },
     ])
+  })
+
+  it('reports a dropped tool call instead of failing the request', async () => {
+    const http = await endpoint((response) => {
+      response.end(sse([
+        start,
+        { type: 'content_block_start', index: 0, content_block: { type: 'thinking', thinking: 'considering' } },
+        { type: 'content_block_stop', index: 0 },
+        { type: 'content_block_start', index: 1, content_block: { type: 'tool_use', id: 'call_1', name: 'bash', input: {} } },
+        { type: 'content_block_delta', index: 1, delta: { type: 'input_json_delta', partial_json: '{"command": "ls' } },
+        { type: 'content_block_stop', index: 1 },
+        ...end('tool_use'),
+      ]))
+    })
+    const degraded: { provider: string; model: string; degradation: StreamDegradation }[] = []
+    const llm = adapter({ baseURL: http.url }, { onStreamDegrade: detail => degraded.push(detail) })
+    const result = await assemble(llm.stream(options()))
+
+    expect(degraded.map(detail => detail.degradation.kind)).toEqual(['tool-call-dropped'])
+    expect(degraded[0]).toMatchObject({ provider: 'deepseek-official', model: MODEL })
+    expect(result.message.content).toEqual([{ type: 'reasoning', text: 'considering' }])
+    expect(result.assembler.finish).toEqual({ kind: 'stop' })
   })
 
   it('sends the tool-changes beta header only when update blocks are present', async () => {

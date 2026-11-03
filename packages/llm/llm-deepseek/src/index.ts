@@ -39,3 +39,4 @@ export type { RequestDefaults } from './types.ts'
 
 export { catalogModelInfo } from './model-info.ts'
 export { registerDeepSeekProvider } from './host.ts'
+export type { StreamDegradation } from './translate.ts'

@@ -1,0 +1,38 @@
+{
+  "note": "Frames recorded from the live provider streams that failed a turn (QIA-426).",
+  "cases": {
+    "toolJsonTruncated": {
+      "provenance": "qia-654-99872846c72e session multica-4dddad53-3e50-4cae-8bf8-6d8c65cdec6a turn 46 step 46: the bash arguments stop mid-object on the upstream token </|DSML|: — the recorded finish is MALFORMED_RESPONSE 'tool input is invalid JSON'.",
+      "model": "deepseek-v4-flash",
+      "reasoning": "Timed out at 200s (no output at all means ssh command hung — likely the engine was waiting on network). Hmm, exit code 124 = timeout killed ssh.\n\nThe engine run may take long (model inference). Let me check the evidence files and whether a response arrived.\n\nActually (no output) is odd — even `echo exit=` should print. Unless the whole ssh hung and timeout killed it before any output flushed. Yes, timeout killed the remote command; stdout buffered.\n\nLet me check the evidence files now and the log to see whether it attempted the request.",
+      "toolCall": {
+        "id": "call_00_i6jhcewu7jmkzryp2637dkcb",
+        "name": "bash",
+        "arguments": "{\"command\": \"timeout 120 ssh -o BatchMode=yes mbp 'B=~/projects/dumate/worktrees/qia654-n611; ls -l $B/evidence/engine-run.*; echo \\\"--- out\\\"; head -c 300 $B/evidence/engine-run.out; echo; echo \\\"--- err\\\"; tail -c 800 $B/evidence/engine-run.err; echo; echo \\\"--- server logs newest\\\"; ls -t $B/run/data/logs/server 2>/dev/null | head -3; tail -c 600 $B/run/data/logs/server/$(ls -t $B/run/data/logs/server 2>/dev/null | head -1) 2>/dev/null; echo; echo \\\"--- backend proxy log\\\"; tail -5 \\\"~/Library/Application Support/dumate-multica/assistant_service_xdg/e77e9eb992c74211b51f87117460b586/data/logs/server/\\\"$(ls -t ~/Library/Application\\\\ Support/dumate-multica/assistant_service_xdg/*/data/logs/server | head -1) 2>/dev/null'\", \"description\": \"Inspect engine run artifacts\", \"justification\": \"查看引擎请求的输出与日志，判断是否解析到模型。\", \"danger-full-access</｜｜DSML｜｜: "
+      },
+      "stopReason": "tool_use"
+    },
+    "duplicateMessageStart": {
+      "provenance": "same session, turn 30 step 18: the provider restarted the envelope after the reasoning block closed and the bash block opened, so translate recorded MALFORMED_RESPONSE 'duplicate message_start'.",
+      "model": "deepseek-v4-flash",
+      "reasoning": "I should check the full dictionary to align transient codes like insufficient_quota, so I'm going to look at lines 885-930 and the no-output reason function.\n\n",
+      "toolCall": {
+        "id": "toolu_bdrk_01MLLaQP3Zdd8dMtkRyP6qZ4",
+        "name": "bash",
+        "arguments": "{\"command\":\"git status --short\"}"
+      },
+      "stopReason": "tool_use"
+    },
+    "prematureEnd": {
+      "provenance": "qia-583-c5159ef878ac session multica-338220e8-f235-43e0-8a38-e0e4cc2d40b0 turn 2 step 73: the reasoning block closed, then the socket ended inside the bash arguments, so translate recorded STREAM_CLOSED; the reasoning text is abbreviated to its first 200 characters.",
+      "model": "deepseek-v4-flash",
+      "reasoning": "Great.\n\nNeed maybe run `swiftc` actual with **only** `Types.swift` error; we have. The other errors `VMPortRange` are due not compiling all files; don't overstate. The access error is independent; min",
+      "toolCall": {
+        "id": "call_00_uu8k6tj7wpdtl606bwvanfhj",
+        "name": "bash",
+        "arguments": "{\"command\": \"cd /home/euler/multica_workspaces/qianfan-f873a7fd89d0/qia-583-c5159ef878ac/workdir && cat > review.html <<'HTML'\\n<!DOCTYPE html>\\n<html lang=\\\"zh-CN\\\">\\n<head>\\n<meta charset=\\\"utf-8\\\">\\n<meta name=\\\"viewport\\\" content=\\\"width=device-width, initial-scale=1\\\">\\n<title>QIA-583 R11-N3 复核报告（web13 凭据修复）</title>\\n<style>\\n  :root{\\n    --bg:#0d1014;--panel:#141922;--panel2:#10151d;--line:#28303c;--fg:#e7eaf0;--muted:#94a0b2;\\n    --block:#ff5d5d;--warn:#f5b942;--sug:#5fb3ff;--ok:#4ecb8d;--violet:#b58cff;--code:#090"
+      },
+      "stopReason": null
+    }
+  }
+}

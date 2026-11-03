@@ -1,6 +1,8 @@
 /** Protocol invariants at JSON/SSE boundaries, including partial and failed responses. */
+import { readFileSync } from 'node:fs'
 import { describe, expect, it } from 'vitest'
 import { translate } from '../src/translate.ts'
+import type { StreamDegradation } from '../src/translate.ts'
 import { parseSse } from '../src/sse.ts'
 import { providerError } from '../src/transport.ts'
 import { assemble, chunks, end, events, MODEL, sse, start, textEvents } from './helpers.ts'
@@ -59,7 +61,6 @@ describe('Messages stream', () => {
   })
 
   it.each([
-    [start, start],
     [textEvents[1]],
     [start, { ...textEvents[1], index: -1 }],
     [start, textEvents[1], textEvents[1]],
@@ -78,17 +79,53 @@ describe('Messages stream', () => {
     await expect(chunks(translate(events(values as Record<string, unknown>[]), MODEL))).rejects.toMatchObject({ code: 'MALFORMED_RESPONSE' })
   })
 
-  it.each(['{', '[]'])('refuses completed non-object tool JSON %s without repairing it', async (partial_json) => {
+  it('ignores a restarted message_start and keeps the first frame', async () => {
+    const degraded: StreamDegradation[] = []
+    const result = await chunks(translate(events([
+      start,
+      { ...start, message: { usage: { input_tokens: 99, output_tokens: 99 } } },
+      ...textEvents.slice(1),
+    ]), MODEL, degradation => degraded.push(degradation)))
+    expect(result.at(-2)).toMatchObject({ type: 'usage', usage: { inputTokens: 12 } })
+    expect(result.at(-1)).toMatchObject({ type: 'finish', reason: { kind: 'stop' } })
+    expect(degraded.map(degradation => degradation.kind)).toEqual(['duplicate-message-start'])
+  })
+
+  it.each(['{', '[]'])('drops completed non-object tool JSON %s and fails only when nothing usable remains', async (partial_json) => {
+    const degraded: StreamDegradation[] = []
     await expect(chunks(translate(events([start,
       { type: 'content_block_start', index: 0, content_block: { type: 'tool_use', id: 'a', name: 'read', input: {} } },
       { type: 'content_block_delta', index: 0, delta: { type: 'input_json_delta', partial_json } },
-      { type: 'content_block_stop', index: 0 }, ...end('tool_use')]), MODEL))).rejects.toMatchObject({ code: 'MALFORMED_RESPONSE' })
+      { type: 'content_block_stop', index: 0 }, ...end('tool_use')]), MODEL, degradation => degraded.push(degradation))))
+      .rejects.toMatchObject({ code: 'EMPTY_RESPONSE' })
+    expect(degraded.map(degradation => degradation.kind)).toEqual(['tool-call-dropped'])
   })
 
   it('refuses unsupported response content, empty responses and premature EOF', async () => {
     await expect(chunks(translate(events([start, { type: 'content_block_start', index: 0, content_block: { type: 'redacted_thinking', data: 'x' } }]), MODEL))).rejects.toMatchObject({ code: 'UNSUPPORTED_CONTENT' })
     await expect(chunks(translate(events([start, ...end()]), MODEL))).rejects.toMatchObject({ code: 'EMPTY_RESPONSE' })
-    await expect(chunks(translate(events(textEvents.slice(0, -1)), MODEL))).rejects.toMatchObject({ code: 'STREAM_CLOSED' })
+    await expect(chunks(translate(events([start, ...textEvents.slice(1, 3)]), MODEL))).rejects.toMatchObject({ code: 'STREAM_CLOSED' })
+  })
+
+  it('keeps a completed tool call when the stream ends without message_stop', async () => {
+    const result = await assemble(translate(events([start,
+      { type: 'content_block_start', index: 0, content_block: { type: 'tool_use', id: 'a', name: 'read', input: {} } },
+      { type: 'content_block_delta', index: 0, delta: { type: 'input_json_delta', partial_json: '{"path":"a"}' } },
+      { type: 'content_block_stop', index: 0 }]), MODEL))
+    expect(result.message.content).toEqual([{ type: 'tool-call', id: 'a', name: 'read', arguments: '{"path":"a"}' }])
+    expect(result.assembler.finish).toEqual({ kind: 'tool-calls' })
+  })
+
+  it('fails a stream that ends before any block arrived', async () => {
+    await expect(chunks(translate(events([start]), MODEL))).rejects.toMatchObject({ code: 'STREAM_CLOSED' })
+  })
+
+  it('settles the blocks already delivered when the stop frame is lost', async () => {
+    const degraded: StreamDegradation[] = []
+    const result = await chunks(translate(events([start, ...textEvents.slice(1, 4), { type: 'message_delta', delta: { stop_reason: 'end_turn' } }]), MODEL, degradation => degraded.push(degradation)))
+    expect(result.flatMap(chunk => chunk.type === 'text-delta' ? [chunk.text] : [])).toEqual(['Hello 世界'])
+    expect(result.at(-1)).toMatchObject({ type: 'finish', reason: { kind: 'stop' } })
+    expect(degraded.map(degradation => degradation.kind)).toEqual(['premature-end'])
   })
 })
 
@@ -113,8 +150,10 @@ describe('SSE framing and provider failures', () => {
   it.each(['data: not-json\n\n', 'data: []\n\n', 'event: ping\ndata: {"type":"other"}\n\n', 'data: {}\n\n'])('rejects malformed SSE %#', async (text) => {
     await expect(read(text)).rejects.toMatchObject({ code: 'MALFORMED_RESPONSE' })
   })
-  it('does not flush an unterminated terminal event', async () => {
-    await expect(read(sse(textEvents).trimEnd())).rejects.toMatchObject({ code: 'STREAM_CLOSED' })
+  it('does not flush an unterminated terminal event and settles what arrived', async () => {
+    const { result } = await read(sse(textEvents).trimEnd())
+    expect(result.filter(chunk => chunk.type === 'text-delta').map(chunk => chunk.text)).toEqual(['Hello 世界'])
+    expect(result.at(-1)).toMatchObject({ type: 'finish', reason: { kind: 'stop' } })
   })
   it('normalizes in-band overloads', async () => {
     await expect(read(sse([{ type: 'error', error: { type: 'overloaded_error', message: 'busy' } }]))).rejects.toMatchObject({ code: 'SERVER' })
@@ -133,5 +172,84 @@ describe('SSE framing and provider failures', () => {
     expect(providerError(null, 429, new Headers({ 'retry-after': '2', 'request-id': 'r1' })).failure).toMatchObject({ requestId: 'r1', providerRetryAfterMs: 2000 })
     expect(providerError({}, 503, new Headers({ 'retry-after': new Date(Date.now() + 60_000).toUTCString(), 'x-request-id': 'r2' })).failure.providerRetryAfterMs).toBeGreaterThan(0)
     expect(providerError({}, 500, new Headers({ 'retry-after': 'invalid', 'x-deepseek-request-id': 'r3' })).failure).toMatchObject({ requestId: 'r3' })
+  })
+})
+
+interface RecordedFrame {
+  provenance: string
+  model: string
+  reasoning: string
+  toolCall: { id: string; name: string; arguments: string }
+  stopReason: string | null
+}
+
+const recorded = (JSON.parse(readFileSync(new URL('./fixtures/qia426-interrupted-frames.json', import.meta.url), 'utf8')) as {
+  cases: Record<'toolJsonTruncated' | 'duplicateMessageStart' | 'prematureEnd', RecordedFrame>
+}).cases
+
+/** Replay one recorded frame as the Messages events it stood for.
+ * @param frame - recorded reasoning and tool call.
+ * @param shape - restart inserts the duplicate envelope frame; ended stops where the recording did.
+ * @returns the provider events, in arrival order.
+ */
+function recordedEvents(frame: RecordedFrame, shape: { restart?: boolean; ended?: boolean } = {}) {
+  const json = frame.toolCall.arguments
+  const fragments = Array.from({ length: Math.ceil(json.length / 40) }, (_, index) => json.slice(index * 40, index * 40 + 40))
+  const values: Record<string, unknown>[] = [
+    start,
+    { type: 'content_block_start', index: 0, content_block: { type: 'thinking', thinking: '' } },
+    { type: 'content_block_delta', index: 0, delta: { type: 'thinking_delta', thinking: frame.reasoning } },
+    { type: 'content_block_stop', index: 0 },
+    { type: 'content_block_start', index: 1, content_block: { type: 'tool_use', id: frame.toolCall.id, name: frame.toolCall.name, input: {} } },
+    ...shape.restart === true ? [start] : [],
+    ...fragments.map(partial_json => ({ type: 'content_block_delta', index: 1, delta: { type: 'input_json_delta', partial_json } })),
+  ]
+  if (shape.ended !== true) {
+    values.push({ type: 'content_block_stop', index: 1 })
+    if (frame.stopReason !== null) values.push({ type: 'message_delta', delta: { stop_reason: frame.stopReason } }, { type: 'message_stop' })
+  }
+  return events(values)
+}
+
+describe('recorded interrupt frames', () => {
+  it('drops the recorded truncated tool call and continues the turn', async () => {
+    const degraded: StreamDegradation[] = []
+    const frame = recorded.toolJsonTruncated
+    const result = await assemble(translate(recordedEvents(frame), frame.model, degradation => degraded.push(degradation)))
+
+    expect(degraded.map(degradation => degradation.kind)).toEqual(['tool-call-dropped'])
+    expect(degraded[0]?.detail).toContain('855')
+    expect(result.message.content).toEqual([{ type: 'reasoning', text: frame.reasoning }])
+    expect(result.assembler.finish).toEqual({ kind: 'stop' })
+    expect(result.output.some(chunk => chunk.type === 'finish' && chunk.reason.kind === 'error')).toBe(false)
+    expect(result.output.flatMap(chunk => chunk.type === 'block-start' ? [chunk.blockType] : [])).toEqual(['reasoning'])
+  })
+
+  it('ignores the recorded restarted message_start and keeps the call that followed', async () => {
+    const degraded: StreamDegradation[] = []
+    const frame = recorded.duplicateMessageStart
+    const result = await assemble(translate(
+      recordedEvents(frame, { restart: true }),
+      frame.model,
+      degradation => degraded.push(degradation),
+    ))
+
+    expect(degraded.map(degradation => degradation.kind)).toEqual(['duplicate-message-start'])
+    expect(result.message.content).toEqual([
+      { type: 'reasoning', text: frame.reasoning },
+      { type: 'tool-call', id: frame.toolCall.id, name: frame.toolCall.name, arguments: frame.toolCall.arguments },
+    ])
+    expect(result.assembler.finish).toEqual({ kind: 'tool-calls' })
+  })
+
+  it('settles the recorded early end with the completed block and no unfinished call', async () => {
+    const degraded: StreamDegradation[] = []
+    const frame = recorded.prematureEnd
+    const result = await assemble(translate(recordedEvents(frame, { ended: true }), frame.model, degradation => degraded.push(degradation)))
+
+    expect(degraded.map(degradation => degradation.kind)).toEqual(['premature-end'])
+    expect(result.message.content).toEqual([{ type: 'reasoning', text: frame.reasoning }])
+    expect(result.assembler.finish).toEqual({ kind: 'stop' })
+    expect(result.output.flatMap(chunk => chunk.type === 'block-start' ? [chunk.blockType] : [])).toEqual(['reasoning'])
   })
 })
