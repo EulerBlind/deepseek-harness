@@ -91,13 +91,13 @@ describe('Messages stream', () => {
     expect(degraded.map(degradation => degradation.kind)).toEqual(['duplicate-message-start'])
   })
 
-  it.each(['{', '[]'])('drops completed non-object tool JSON %s and fails only when nothing usable remains', async (partial_json) => {
+  it.each(['{', '[]'])('drops completed non-object tool JSON %s and settles an empty stop instead of failing the turn', async (partial_json) => {
     const degraded: StreamDegradation[] = []
-    await expect(chunks(translate(events([start,
+    const result = await chunks(translate(events([start,
       { type: 'content_block_start', index: 0, content_block: { type: 'tool_use', id: 'a', name: 'read', input: {} } },
       { type: 'content_block_delta', index: 0, delta: { type: 'input_json_delta', partial_json } },
-      { type: 'content_block_stop', index: 0 }, ...end('tool_use')]), MODEL, degradation => degraded.push(degradation))))
-      .rejects.toMatchObject({ code: 'EMPTY_RESPONSE' })
+      { type: 'content_block_stop', index: 0 }, ...end('tool_use')]), MODEL, degradation => degraded.push(degradation)))
+    expect(result.at(-1)).toMatchObject({ type: 'finish', reason: { kind: 'stop' } })
     expect(degraded.map(degradation => degradation.kind)).toEqual(['tool-call-dropped'])
   })
 
@@ -251,5 +251,48 @@ describe('recorded interrupt frames', () => {
     expect(result.message.content).toEqual([{ type: 'reasoning', text: frame.reasoning }])
     expect(result.assembler.finish).toEqual({ kind: 'stop' })
     expect(result.output.flatMap(chunk => chunk.type === 'block-start' ? [chunk.blockType] : [])).toEqual(['reasoning'])
+  })
+
+  it('settles an empty stop when the recorded tail was cut mid-arguments', async () => {
+    const degraded: StreamDegradation[] = []
+    const frame = recorded.toolJsonTruncated
+    const result = await chunks(translate(events([
+      start,
+      { type: 'content_block_start', index: 0, content_block: { type: 'tool_use', id: frame.toolCall.id, name: frame.toolCall.name, input: {} } },
+      { type: 'content_block_delta', index: 0, delta: { type: 'input_json_delta', partial_json: frame.toolCall.arguments } },
+    ]), frame.model, degradation => degraded.push(degradation)))
+
+    expect(degraded.map(degradation => degradation.kind)).toEqual(['premature-end'])
+    expect(degraded[0]?.detail).toContain(frame.toolCall.name)
+    expect(result.at(-1)).toMatchObject({ type: 'finish', reason: { kind: 'stop' } })
+  })
+
+  it('settles a message_stop whose only block was the truncated tool call', async () => {
+    const degraded: StreamDegradation[] = []
+    const frame = recorded.toolJsonTruncated
+    const result = await chunks(translate(events([
+      start,
+      { type: 'content_block_start', index: 0, content_block: { type: 'tool_use', id: frame.toolCall.id, name: frame.toolCall.name, input: {} } },
+      { type: 'content_block_delta', index: 0, delta: { type: 'input_json_delta', partial_json: frame.toolCall.arguments } },
+      { type: 'content_block_stop', index: 0 },
+      { type: 'message_delta', delta: { stop_reason: 'tool_use' } },
+      { type: 'message_stop' },
+    ]), frame.model, degradation => degraded.push(degradation)))
+
+    expect(degraded.map(degradation => degradation.kind)).toEqual(['tool-call-dropped'])
+    expect(result.at(-1)).toMatchObject({ type: 'finish', reason: { kind: 'stop' } })
+  })
+
+  it('keeps a tool call whose arguments completed before the stop frame was lost', async () => {
+    const degraded: StreamDegradation[] = []
+    const result = await assemble(translate(events([
+      start,
+      { type: 'content_block_start', index: 0, content_block: { type: 'tool_use', id: 'a', name: 'read', input: {} } },
+      { type: 'content_block_delta', index: 0, delta: { type: 'input_json_delta', partial_json: '{"path":"a"}' } },
+    ]), MODEL, degradation => degraded.push(degradation)))
+
+    expect(degraded.map(degradation => degradation.kind)).toEqual(['premature-end'])
+    expect(result.message.content).toEqual([{ type: 'tool-call', id: 'a', name: 'read', arguments: '{"path":"a"}' }])
+    expect(result.assembler.finish).toEqual({ kind: 'tool-calls' })
   })
 })

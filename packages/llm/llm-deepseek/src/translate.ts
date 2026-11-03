@@ -140,14 +140,24 @@ function stopReason(raw: unknown): FinishReason {
  * @param blocks - blocks that already reached the stream; none can be retracted.
  * @param usage - cumulative token usage for the request.
  * @param model - requested model id stored in durable replay state.
+ * @param degraded - true when a frame, a Tool call or the tail was already lost;
+ *   an empty then settles as `stop` instead of failing the turn.
  * @returns the terminal usage and finish chunks.
  */
-function* settlement(reason: FinishReason, blocks: Map<number, Block>, usage: TokenUsage, model: string): Generator<StreamChunk> {
+function* settlement(
+  reason: FinishReason,
+  blocks: Map<number, Block>,
+  usage: TokenUsage,
+  model: string,
+  degraded = false,
+): Generator<StreamChunk> {
   const toolCalls = [...blocks.values()].filter(block => block.content.type === 'tool-call')
   // A `tool-calls` settlement without a surviving call would hand the loop an
   // empty step; `stop` instead lets the unfinished-output guard re-request it.
   const settled: FinishReason = reason.kind === 'tool-calls' && toolCalls.length === 0 ? { kind: 'stop' } : reason
-  if (blocks.size === 0 && settled.kind === 'stop') throw new LlmError('DeepSeek Messages returned no content', 'EMPTY_RESPONSE')
+  // Losing every block to a degraded tail is the loss the sink already reported;
+  // only a stream that never carried content is worth failing.
+  if (blocks.size === 0 && settled.kind === 'stop' && !degraded) throw new LlmError('DeepSeek Messages returned no content', 'EMPTY_RESPONSE')
   usage.totalTokens = usage.inputTokens + usage.outputTokens + (usage.cacheReadTokens ?? 0) + (usage.cacheWriteTokens ?? 0)
   yield { type: 'usage', usage }
   yield { type: 'finish', reason: settled, replayState: replayState(model, [...blocks.values()].map(block => block.replay)) }
@@ -158,8 +168,10 @@ function* settlement(reason: FinishReason, blocks: Map<number, Block>, usage: To
  * A stream that loses a frame settles with what it has instead of voiding the
  * turn: a Tool call whose arguments cannot be executed is dropped (the loss is
  * one call), a restarted `message_start` keeps the first frame, and an early end
- * keeps every block that already completed. Only a stream with nothing usable
- * fails.
+ * keeps every block that already completed — including a Tool call whose
+ * arguments were complete when the stop frame was lost. A tail that lost its only
+ * block settles as `stop` and is reported through onDegrade; only a stream that
+ * never carried content fails.
  * @param events - framed, decoded provider events in arrival order.
  * @param model - requested model id stored in durable replay state.
  * @param onDegrade - optional diagnostic sink for degraded streams; receives no content.
@@ -174,12 +186,17 @@ export async function* translate(
   const usage: TokenUsage = { inputTokens: 0, outputTokens: 0 }
   let started = false
   let reason: FinishReason | undefined
+  let degraded = false
+  const degrade = (kind: StreamDegradation['kind'], detail: string) => {
+    degraded = true
+    onDegrade?.({ kind, detail })
+  }
   for await (const event of events) {
     if (event.type === 'message_start') {
       if (started) {
         // The provider restarted the envelope mid-stream; the first frame owns
         // the usage and the blocks already emitted stay authoritative.
-        onDegrade?.({ kind: 'duplicate-message-start', detail: 'kept the first message_start and ignored the restart' })
+        degrade('duplicate-message-start', 'kept the first message_start and ignored the restart')
         continue
       }
       updateUsage(usage, object(event.message).usage)
@@ -220,10 +237,7 @@ export async function* translate(
           // Truncated or non-object arguments cannot be dispatched or replayed;
           // dropping the call costs this step one call, not the whole turn.
           blocks.delete(wireIndex)
-          onDegrade?.({
-            kind: 'tool-call-dropped',
-            detail: `dropped tool call "${block.content.name}" with unusable ${block.content.arguments.length}-character arguments`,
-          })
+          degrade('tool-call-dropped', `dropped tool call "${block.content.name}" with unusable ${block.content.arguments.length}-character arguments`)
           continue
         }
         yield* block.pending
@@ -235,22 +249,35 @@ export async function* translate(
       if (event.usage !== undefined) updateUsage(usage, event.usage)
     } else {
       if (reason === undefined || [...blocks.values()].some(block => !block.closed)) return malformed('message_stop without settled blocks and stop reason')
-      yield* settlement(reason, blocks, usage, model)
+      yield* settlement(reason, blocks, usage, model, degraded)
       return
     }
   }
   // The provider closed the stream without `message_stop`. A partially streamed
   // reply must not surface as the answer, so visible text keeps the fail-closed
-  // behavior; an open Tool call never reached the assembler and is the single
-  // loss a cut stream costs.
+  // behavior; a Tool call is kept when its arguments completed and dropped with a
+  // degradation when they were cut, so a tail never voids the whole turn.
   if ([...blocks.values()].some(block => !block.closed && block.content.type === 'text')) {
     throw new LlmError('DeepSeek Messages stream ended before message_stop', 'STREAM_CLOSED')
   }
+  const cut: string[] = []
   for (const [wireIndex, block] of blocks) {
-    if (!block.closed && block.content.type === 'tool-call') blocks.delete(wireIndex)
+    if (block.closed || block.content.type !== 'tool-call') continue
+    if (block.json.length > 0 && executableArguments(block.json)) {
+      // The arguments arrived complete; only the close the provider never sent is
+      // missing, so the call is still dispatchable.
+      block.content.arguments = block.json
+      block.closed = true
+      yield* block.pending
+      yield { type: 'block-end', index: block.index, block: { ...block.content } }
+      continue
+    }
+    blocks.delete(wireIndex)
+    cut.push(block.content.name)
   }
-  if (blocks.size === 0) throw new LlmError('DeepSeek Messages stream ended before message_stop', 'STREAM_CLOSED')
-  onDegrade?.({ kind: 'premature-end', detail: `settled ${blocks.size} block(s) after the provider closed the stream early` })
+  if (cut.length > 0) degrade('premature-end', `dropped tool call(s) ${cut.map(name => `"${name}"`).join(', ')} the provider cut mid-arguments`)
+  if (blocks.size === 0 && !degraded) throw new LlmError('DeepSeek Messages stream ended before message_stop', 'STREAM_CLOSED')
+  if (blocks.size > 0 && cut.length === 0) degrade('premature-end', `settled ${blocks.size} block(s) after the provider closed the stream early`)
   const settled = reason ?? ([...blocks.values()].some(block => block.content.type === 'tool-call') ? { kind: 'tool-calls' as const } : { kind: 'stop' as const })
-  yield* settlement(settled, blocks, usage, model)
+  yield* settlement(settled, blocks, usage, model, degraded)
 }
