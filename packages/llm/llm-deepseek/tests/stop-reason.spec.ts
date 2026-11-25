@@ -68,6 +68,13 @@ describe('provider stop reasons', () => {
     expect(result.assembler.replayState).toMatchObject({ blocks: [{ type: 'text' }] })
   })
 
+  it('fills an empty text block the refusal cut open with the notice alone', async () => {
+    const result = await run([start, textEvents[1], ...end('refusal')])
+
+    expect(result.message.content).toEqual([{ type: 'text', text: refusalNotice }])
+    expect(result.assembler.finish).toEqual({ kind: 'stop' })
+  })
+
   it('settles a refusal whose message_stop was lost', async () => {
     const result = await run([...textEvents.slice(0, 3), { type: 'message_delta', delta: { stop_reason: 'refusal' } }])
 
