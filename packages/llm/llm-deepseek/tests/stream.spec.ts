@@ -68,7 +68,6 @@ describe('Messages stream', () => {
     [start, textEvents[1], textEvents[3], textEvents[3]],
     [start, { ...textEvents[1], content_block: { type: 'text', text: 2 } }],
     [start, textEvents[1], { type: 'content_block_delta', index: 0, delta: { type: 'thinking_delta', thinking: 'bad' } }],
-    [start, { type: 'message_delta', delta: { stop_reason: 'mystery' } }],
     [start, { type: 'message_stop' }],
     [start, textEvents[1], ...end()],
     [start, { type: 'message_delta', delta: {}, usage: { input_tokens: -1 } }],

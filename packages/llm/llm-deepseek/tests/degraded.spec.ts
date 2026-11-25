@@ -52,4 +52,28 @@ describe('degraded Messages streams', () => {
         + ` tool-call-dropped (dropped tool call "bash" with unusable ${partial.length}-character arguments)`,
     ]])
   })
+
+  it('completes a refused turn with the partial reply, a visible notice and a warning', async () => {
+    const ctx = await boot()
+    const warnings: unknown[][] = []
+    ctx.logger.exporter({ levels: { default: LoggerLevel.WARN }, export: (message) => { if (message.type === 'warn') warnings.push(message.args) } })
+    vi.stubGlobal('fetch', vi.fn<typeof globalThis.fetch>().mockResolvedValue(new Response(sse([
+      start,
+      { type: 'content_block_start', index: 0, content_block: { type: 'text', text: '' } },
+      { type: 'content_block_delta', index: 0, delta: { type: 'text_delta', text: 'I can help with' } },
+      ...end('refusal'),
+    ]))))
+
+    const result = await assemble(ctx.llm.stream(options()))
+
+    expect(result.message.content).toEqual([{
+      type: 'text',
+      text: 'I can help with\n\n⚠ The model provider refused to continue this response (stop_reason "refusal"). Any reply above may be incomplete; rephrase the request or switch to another model.',
+    }])
+    expect(result.assembler.finish).toEqual({ kind: 'stop' })
+    expect(warnings).toEqual([[
+      'llm-deepseek: route "deepseek-official/deepseek-v4-flash" settled a degraded Messages stream instead of failing the turn:'
+        + ' refusal (provider stop_reason "refusal" settled as stop with a visible notice)',
+    ]])
+  })
 })
